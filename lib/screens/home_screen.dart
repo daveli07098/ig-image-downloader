@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/download_queue_provider.dart';
+import '../providers/settings_provider.dart';
 import '../providers/share_intent_provider.dart';
 import '../services/ig_url_parser.dart';
 import '../widgets/download_job_tile.dart';
@@ -63,6 +64,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     });
 
     final jobs = ref.watch(downloadQueueProvider);
+    final settings = ref.watch(settingsProvider);
     final hasFinished = jobs.any(
       (j) => j.status == JobStatus.done || j.status == JobStatus.error,
     );
@@ -78,6 +80,32 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ],
         ),
         actions: [
+          // Wi-Fi only toggle
+          IconButton(
+            icon: Icon(
+              settings.wifiOnly ? Icons.wifi : Icons.wifi_off,
+              color: settings.wifiOnly
+                  ? Theme.of(context).colorScheme.primary
+                  : Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.4),
+            ),
+            tooltip: settings.wifiOnly
+                ? 'Wi-Fi only: ON — tap to allow mobile data'
+                : 'Wi-Fi only: OFF — tap to restrict to Wi-Fi',
+            onPressed: () {
+              final next = !settings.wifiOnly;
+              ref.read(settingsProvider.notifier).setWifiOnly(next);
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                    next
+                        ? 'Wi-Fi only mode enabled'
+                        : 'Wi-Fi only mode disabled',
+                  ),
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
+          ),
           if (hasFinished)
             TextButton.icon(
               onPressed: () =>

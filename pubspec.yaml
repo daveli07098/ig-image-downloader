@@ -38,6 +38,12 @@ dependencies:
   # Open saved files / folders from within the app
   open_filex: ^4.7.0
 
+  # Network connectivity check (WiFi vs mobile data)
+  connectivity_plus: ^6.1.4
+
+  # Persistent user settings (WiFi-only toggle, etc.)
+  shared_preferences: ^2.3.3
+
   # UI extras
   flutter_svg: ^2.0.10+1
 

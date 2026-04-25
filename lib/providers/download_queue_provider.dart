@@ -1,8 +1,10 @@
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import '../models/download_job.dart';
 import '../services/downloader_service.dart';
 import '../services/ig_url_parser.dart';
+import 'settings_provider.dart';
 
 const _uuid = Uuid();
 
@@ -15,7 +17,6 @@ final downloadQueueProvider =
 class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   DownloadQueueNotifier(Ref ref) : _ref = ref, super([]);
 
-  // ignore: unused_field
   final Ref _ref;
 
   /// Enqueue specific [MediaItem]s from an IG post URL.
@@ -59,6 +60,24 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   // ── internals ──────────────────────────────────────────────────
 
   Future<void> _run(String jobId) async {
+    // ── WiFi-only gate ───────────────────────────────────────────────────
+    final settings = _ref.read(settingsProvider);
+    if (settings.wifiOnly) {
+      final results = await Connectivity().checkConnectivity();
+      final onWifi = results.contains(ConnectivityResult.wifi);
+      if (!onWifi) {
+        _updateJob(
+          jobId,
+          (j) => j.copyWith(
+            status: JobStatus.error,
+            errorMsg:
+                'Wi-Fi only mode is on — connect to Wi-Fi to download.',
+          ),
+        );
+        return;
+      }
+    }
+
     _updateJob(jobId, (j) => j.copyWith(status: JobStatus.downloading));
 
     final job = state.firstWhere((j) => j.id == jobId);
