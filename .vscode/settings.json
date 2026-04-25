@@ -1,0 +1,9 @@
+{
+  "github.copilot.chat.agent.autoApprove": false,
+  "github.copilot.chat.codeGeneration.instructions": [],
+  "chat.tools.autoApprove": false,
+  "github.copilot.chat.runCommand.enabled": true,
+  "github.copilot.chat.edits.temporalContext.enabled": false,
+  "github.copilot.chat.agent.thinkingTool.enabled": false,
+  "mcp.servers": {}
+}
