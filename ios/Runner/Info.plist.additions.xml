@@ -1,0 +1,60 @@
+<!--
+  ios/Runner/Info.plist additions for IG Downloader.
+
+  After `flutter create .` generates ios/Runner/Info.plist, ADD the following
+  keys inside the root <dict> element.
+
+  These keys are required for:
+    1. receive_sharing_intent to receive text/URLs from the iOS share sheet
+    2. Photo library write access  (gal package)
+    3. Network usage description   (App Store compliance)
+-->
+
+<!-- ── Photo library write permission ────────────────────────────────────── -->
+<key>NSPhotoLibraryAddUsageDescription</key>
+<string>IG Downloader needs access to save downloaded photos and videos to your Photos library.</string>
+
+<!-- The full key below is not needed for write-only access in iOS 11+,
+     but some older devices may require it. -->
+<key>NSPhotoLibraryUsageDescription</key>
+<string>IG Downloader saves downloaded media to your Photos library.</string>
+
+<!-- ── Network usage description (ATS — allow arbitrary loads for IG CDN) ── -->
+<key>NSAppTransportSecurity</key>
+<dict>
+    <key>NSAllowsArbitraryLoads</key>
+    <true/>
+</dict>
+
+<!--
+  ── receive_sharing_intent: Share Extension setup ────────────────────────────
+  iOS sharing requires a Share Extension target. After `flutter create`, follow
+  these steps:
+
+  1. In Xcode → File → New → Target → Share Extension → name it "ShareExtension"
+  2. In ShareExtension/Info.plist, set NSExtensionActivationRule to:
+       NSExtensionActivationSupportsWebURLWithMaxCount = 1
+       NSExtensionActivationSupportsWebPageWithMaxCount = 1
+  3. Create an App Group: "group.com.daveli.igdownloader.share"
+     (add to both Runner and ShareExtension targets in Signing & Capabilities)
+  4. In ShareExtension/ShareViewController.swift, use the receive_sharing_intent
+     helper to write the shared URL to the App Group container.
+
+  refer to: https://pub.dev/packages/receive_sharing_intent#ios
+-->
+
+<!--
+  ── URL scheme (optional — deep link fallback) ───────────────────────────────
+  Allows instagram://... deep links to open this app if needed.
+-->
+<key>CFBundleURLTypes</key>
+<array>
+    <dict>
+        <key>CFBundleURLSchemes</key>
+        <array>
+            <string>igdownloader</string>
+        </array>
+        <key>CFBundleURLName</key>
+        <string>com.daveli.igdownloader</string>
+    </dict>
+</array>

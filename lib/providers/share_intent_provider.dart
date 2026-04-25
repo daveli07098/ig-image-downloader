@@ -1,0 +1,45 @@
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:receive_sharing_intent/receive_sharing_intent.dart';
+import 'dart:async';
+
+/// Provides the latest Instagram URL shared from another app (e.g. Instagram).
+/// Returns null when no URL has been received yet.
+final sharedUrlProvider =
+    StateNotifierProvider<SharedUrlNotifier, String?>((ref) {
+  return SharedUrlNotifier();
+});
+
+class SharedUrlNotifier extends StateNotifier<String?> {
+  SharedUrlNotifier() : super(null) {
+    _init();
+  }
+
+  late final StreamSubscription<List<SharedMediaFile>> _sub;
+
+  void _init() {
+    // Handle URL shared while app is already in foreground
+    _sub = ReceiveSharingIntent.instance.getMediaStream().listen(
+      _handleMedia,
+      onError: (_) {},
+    );
+
+    // Handle URL that launched/opened the app from share sheet
+    ReceiveSharingIntent.instance.getInitialMedia().then(_handleMedia);
+  }
+
+  void _handleMedia(List<SharedMediaFile> files) {
+    if (files.isEmpty) return;
+    final text = files.first.path; // receive_sharing_intent puts text in path
+    if (text.contains('instagram.com')) {
+      state = text;
+    }
+  }
+
+  void consume() => state = null;
+
+  @override
+  void dispose() {
+    _sub.cancel();
+    super.dispose();
+  }
+}

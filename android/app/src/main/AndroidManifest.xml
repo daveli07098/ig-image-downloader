@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  This is the AndroidManifest for the IG Downloader Flutter app.
+  After running `flutter create .` this file will be auto-generated.
+  MERGE the <intent-filter> and <uses-permission> blocks below into
+  the generated android/app/src/main/AndroidManifest.xml.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- ── Permissions ─────────────────────────────────────────────────── -->
+    <!-- Internet — fetch IG pages and download media -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
+    <!-- Write to external storage (Android 9 and below) -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28"/>
+
+    <!-- Read media (Android 13+) -->
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+
+    <application
+        android:label="IG Downloader"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+
+            <!-- Standard app launch intent -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+
+            <!--
+              ─────────────────────────────────────────────────────────────
+              SHARE INTENT — receives URLs from Instagram (and any other app)
+              When the user taps Share → IG Downloader in Instagram, Android
+              sends an ACTION_SEND intent with mimeType text/plain containing
+              the post URL.
+              ─────────────────────────────────────────────────────────────
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND"/>
+                <category android:name="android.intent.category.DEFAULT"/>
+                <data android:mimeType="text/plain"/>
+            </intent-filter>
+
+        </activity>
+
+        <!-- Don't delete the FlutterActivity meta-data -->
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2"/>
+
+    </application>
+</manifest>

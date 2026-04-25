@@ -1,0 +1,49 @@
+name: ig_downloader
+description: Download Instagram photos, videos, Reels, and Stories via the share sheet.
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+  flutter: '>=3.19.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management
+  flutter_riverpod: ^2.6.1
+
+  # Share intent — receives URLs from Instagram share sheet (Android + iOS)
+  receive_sharing_intent: ^1.8.0
+
+  # HTTP client for fetching IG pages and downloading media
+  dio: ^5.7.0
+
+  # Save downloaded media to device gallery
+  gal: ^2.3.0
+
+  # HTML parsing — extract og:video / og:image from IG pages
+  html: ^0.15.4
+
+  # Temp & app directories
+  path_provider: ^2.1.4
+
+  # Unique IDs for each download job
+  uuid: ^4.5.1
+
+  # Permissions (storage / photos)
+  permission_handler: ^11.3.1
+
+  # UI extras
+  flutter_svg: ^2.0.10+1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/
