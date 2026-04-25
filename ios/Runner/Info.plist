@@ -4,6 +4,31 @@
 <dict>
 	<key>CADisableMinimumFrameDurationOnPhone</key>
 	<true/>
+
+	<!-- ── Photo library permission strings (required by gal) ── -->
+	<!-- Without these keys the app crashes when saving to Photos -->
+	<key>NSPhotoLibraryAddUsageDescription</key>
+	<string>IG Downloader needs access to save downloaded photos and videos to your Photos library.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>IG Downloader needs access to your Photos library to save downloaded media.</string>
+
+	<!-- ── receive_sharing_intent: URL scheme so the share extension can
+	         launch the host app and hand off the shared URL ── -->
+	<!-- NOTE: also add AppGroupId and configure the Share Extension target in Xcode -->
+	<key>AppGroupId</key>
+	<string>$(CUSTOM_GROUP_ID)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>ShareMedia-$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+			</array>
+		</dict>
+	</array>
+
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

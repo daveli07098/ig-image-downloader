@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android Network Security Configuration
+  Instagram and its CDN domains all use HTTPS — block cleartext globally
+  to prevent accidental unencrypted requests.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!-- Trust the system CAs (covers Instagram / AWS CloudFront CDN certs) -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

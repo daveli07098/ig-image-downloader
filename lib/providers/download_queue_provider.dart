@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
@@ -15,9 +17,42 @@ final downloadQueueProvider =
 );
 
 class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
-  DownloadQueueNotifier(Ref ref) : _ref = ref, super([]);
+  DownloadQueueNotifier(Ref ref) : _ref = ref, super([]) {
+    _watchConnectivity();
+  }
 
   final Ref _ref;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+
+  // When Wi-Fi reconnects and wifiOnly mode is on, automatically retry
+  // any jobs that were blocked by the Wi-Fi gate.
+  void _watchConnectivity() {
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((results) {
+      final onWifi = results.contains(ConnectivityResult.wifi);
+      if (!onWifi) return;
+
+      final settings = _ref.read(settingsProvider);
+      if (!settings.wifiOnly) return;
+
+      // Retry all jobs that were blocked by the WiFi-only gate.
+      final blocked = state
+          .where((j) =>
+              j.status == JobStatus.error &&
+              (j.errorMsg?.contains('Wi-Fi only') ?? false))
+          .map((j) => j.id)
+          .toList();
+
+      for (final id in blocked) {
+        retry(id);
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _connectivitySub?.cancel();
+    super.dispose();
+  }
 
   /// Enqueue specific [MediaItem]s from an IG post URL.
   Future<void> enqueueItems(String igUrl, List<MediaItem> selectedItems) async {

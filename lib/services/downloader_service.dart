@@ -125,6 +125,18 @@ class DownloaderService {
       },
     );
 
+    // Request gallery permission on first save (required on both platforms).
+    // gal throws GalException.accessDenied if permission is not granted.
+    if (!await Gal.hasAccess()) {
+      final granted = await Gal.requestAccess();
+      if (!granted) {
+        throw Exception(
+          'Gallery permission denied. '
+          'Please allow Photos access in Settings to save media.',
+        );
+      }
+    }
+
     // Also add to the device gallery so it appears in Photos / Gallery app.
     if (item.isVideo) {
       await Gal.putVideo(savePath);
