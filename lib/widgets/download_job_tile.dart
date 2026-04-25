@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
+import 'package:open_filex/open_filex.dart';
 import '../models/download_job.dart';
+import '../services/storage_service.dart';
 
 class DownloadJobTile extends StatelessWidget {
   const DownloadJobTile({
@@ -176,10 +178,18 @@ class _StatusText extends StatelessWidget {
           style: TextStyle(fontSize: 12, color: cs.primary),
         ),
       JobStatus.done => Row(children: [
-          Icon(Icons.check_circle_rounded, size: 14, color: Colors.green),
+          const Icon(Icons.check_circle_rounded, size: 14, color: Colors.green),
           const SizedBox(width: 4),
-          const Text('Saved to gallery',
-              style: TextStyle(fontSize: 12, color: Colors.green)),
+          Flexible(
+            child: Text(
+              job.outputPath != null
+                  ? StorageService.displayLabel(job.outputPath!)
+                  : 'Saved to gallery',
+              style: const TextStyle(fontSize: 12, color: Colors.green),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
         ]),
       JobStatus.error => Row(children: [
           Icon(Icons.error_outline_rounded, size: 14, color: cs.error),
@@ -211,11 +221,19 @@ class _ActionButton extends StatelessWidget {
           onPressed: onRemove,
           tooltip: 'Cancel',
         ),
-      JobStatus.done => IconButton(
-          icon: const Icon(Icons.delete_outline),
-          onPressed: onRemove,
-          tooltip: 'Remove',
-        ),
+      JobStatus.done => Row(mainAxisSize: MainAxisSize.min, children: [
+          if (job.outputPath != null)
+            IconButton(
+              icon: const Icon(Icons.folder_open_rounded),
+              onPressed: () => OpenFilex.open(job.outputPath!),
+              tooltip: 'Open file',
+            ),
+          IconButton(
+            icon: const Icon(Icons.delete_outline),
+            onPressed: onRemove,
+            tooltip: 'Remove',
+          ),
+        ]),
       JobStatus.error => Row(children: [
           IconButton(
             icon: const Icon(Icons.refresh_rounded),

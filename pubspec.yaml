@@ -35,6 +35,9 @@ dependencies:
   # Permissions (storage / photos)
   permission_handler: ^11.3.1
 
+  # Open saved files / folders from within the app
+  open_filex: ^4.7.0
+
   # UI extras
   flutter_svg: ^2.0.10+1
 

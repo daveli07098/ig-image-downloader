@@ -14,6 +14,7 @@ class DownloadJob {
   final JobStatus status;
   final double progress;      // 0.0 – 1.0
   final String? errorMsg;
+  final String? outputPath;   // permanent file path after successful download
   final DateTime createdAt;
 
   const DownloadJob({
@@ -24,6 +25,7 @@ class DownloadJob {
     required this.status,
     this.progress = 0.0,
     this.errorMsg,
+    this.outputPath,
     required this.createdAt,
   });
 
@@ -35,6 +37,7 @@ class DownloadJob {
     JobStatus? status,
     double? progress,
     String? errorMsg,
+    String? outputPath,
     DateTime? createdAt,
   }) {
     return DownloadJob(
@@ -45,6 +48,7 @@ class DownloadJob {
       status: status ?? this.status,
       progress: progress ?? this.progress,
       errorMsg: errorMsg ?? this.errorMsg,
+      outputPath: outputPath ?? this.outputPath,
       createdAt: createdAt ?? this.createdAt,
     );
   }

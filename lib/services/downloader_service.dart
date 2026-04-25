@@ -1,9 +1,8 @@
-import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:gal/gal.dart';
 import 'package:html/parser.dart' as html_parser;
-import 'package:path_provider/path_provider.dart';
 import '../models/media_item.dart';
+import 'storage_service.dart';
 
 /// Fetches an Instagram page, extracts all media items (supports carousel
 /// posts with multiple images/videos), and downloads selected items to the
@@ -106,35 +105,33 @@ class DownloaderService {
 
   // ── 2.  Download a single MediaItem ───────────────────────────────────
 
-  /// Downloads [item] and saves it to the device gallery.
+  /// Downloads [item] directly to the persistent save folder and also saves
+  /// it to the device gallery. Returns the permanent file path.
   Future<String> downloadItem(
     MediaItem item, {
     required void Function(double progress) onProgress,
   }) async {
     final ext = item.isVideo ? 'mp4' : 'jpg';
-    final tmpDir = await getTemporaryDirectory();
+    final saveDir = await StorageService.getOrCreateSaveDir();
     final filename =
         'ig_${DateTime.now().millisecondsSinceEpoch}_${item.id}.$ext';
-    final localPath = '${tmpDir.path}/$filename';
+    final savePath = '${saveDir.path}/$filename';
 
     await _dio.download(
       item.mediaUrl,
-      localPath,
+      savePath,
       onReceiveProgress: (received, total) {
         if (total > 0) onProgress(received / total);
       },
     );
 
+    // Also add to the device gallery so it appears in Photos / Gallery app.
     if (item.isVideo) {
-      await Gal.putVideo(localPath);
+      await Gal.putVideo(savePath);
     } else {
-      await Gal.putImage(localPath);
+      await Gal.putImage(savePath);
     }
 
-    try {
-      await File(localPath).delete();
-    } catch (_) {}
-
-    return localPath;
+    return savePath;
   }
 }

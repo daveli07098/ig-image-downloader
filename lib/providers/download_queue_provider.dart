@@ -65,13 +65,20 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     final service = DownloaderService();
 
     try {
-      await service.downloadItem(
+      final savedPath = await service.downloadItem(
         job.item,
         onProgress: (progress) {
           _updateJob(jobId, (j) => j.copyWith(progress: progress));
         },
       );
-      _updateJob(jobId, (j) => j.copyWith(status: JobStatus.done, progress: 1.0));
+      _updateJob(
+        jobId,
+        (j) => j.copyWith(
+          status: JobStatus.done,
+          progress: 1.0,
+          outputPath: savedPath,
+        ),
+      );
     } catch (e) {
       _updateJob(jobId, (j) => j.copyWith(status: JobStatus.error, errorMsg: e.toString()));
     }
