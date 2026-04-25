@@ -2,20 +2,31 @@
 
 ## Project Context
 
-**ig-image-downloader** — A cross-platform desktop application for downloading Instagram
-content (photos, videos, Reels, Stories/限時動態, IGTV, multi-image posts) by pasting a URL.
+**ig-image-downloader** — A Flutter mobile app (Android / iOS) for downloading Instagram
+content (photos, videos, Reels, IGTV, multi-image carousel posts). The user shares an
+Instagram URL from the Instagram app; the app shows a preview selection screen, then
+downloads chosen items to a persistent dated folder **and** the device gallery.
+
+> Full architecture diagrams and flow charts: **[docs/architecture.md](../docs/architecture.md)**
 
 **Tech stack:**
-- Flutter (Dart) — desktop-first (macOS / Windows / Linux), with mobile path open later
-- `yt-dlp` (system binary) — actual download engine invoked via `dart:io` Process
-- No database — all state is ephemeral; downloaded files land on local disk
-- File output: configurable local folder, organized `YYYY-MM-DD/` sub-dirs
+- Flutter (Dart) — mobile-first (Android / iOS); FVM 4.0.0 pinned to `stable`
+- `Dio` — HTTP download engine (HTML scraping of og:video / og:image meta tags)
+- `receive_sharing_intent` — Android ACTION_SEND / iOS share extension
+- `gal` — saves files to Android MediaStore / iOS Photos
+- `open_filex` — opens the saved file from within the app
+- `path_provider` — resolves platform-appropriate base directories
+- No database — all state is ephemeral (Riverpod in-memory)
+- File output: `Downloads/IG Downloader/YYYY-MM-DD/` (Android), `Documents/IG Downloader/YYYY-MM-DD/` (iOS)
 
 **Key conventions:**
-- All Instagram URL parsing is done in a dedicated `ig_url_parser.dart` service
+- All Instagram URL parsing is in `lib/services/ig_url_parser.dart`
+- Media extraction: fetch Instagram page HTML, parse `og:video` + `og:image` meta tags
 - Download jobs are plain Dart models (`DownloadJob`) with status: pending / downloading / done / error
-- UI state managed with Riverpod (StateNotifier / AsyncNotifier)
+- `DownloadJob.outputPath` holds the permanent file path set on completion
+- UI state managed with Riverpod (`StateNotifier`, `FutureProvider.family`)
 - No global mutable singletons — pass providers / notifiers explicitly
+- Run Flutter via FVM: `fvm flutter <command>` (binary at `~/.nix-profile/bin/fvm`)
 
 ## Tool Restrictions
 
