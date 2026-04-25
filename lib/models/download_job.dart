@@ -1,14 +1,18 @@
+import 'media_item.dart';
+
+export 'media_item.dart';
+
 enum IgMediaType { post, reel, story, igtv, unknown }
 
 enum JobStatus { pending, downloading, done, error }
 
 class DownloadJob {
   final String id;
-  final String url;
+  final String url;           // original IG post URL
   final IgMediaType mediaType;
+  final MediaItem item;       // the specific media item being downloaded
   final JobStatus status;
-  final double progress; // 0.0 – 1.0
-  final String? outputPath;
+  final double progress;      // 0.0 – 1.0
   final String? errorMsg;
   final DateTime createdAt;
 
@@ -16,9 +20,9 @@ class DownloadJob {
     required this.id,
     required this.url,
     required this.mediaType,
+    required this.item,
     required this.status,
     this.progress = 0.0,
-    this.outputPath,
     this.errorMsg,
     required this.createdAt,
   });
@@ -27,9 +31,9 @@ class DownloadJob {
     String? id,
     String? url,
     IgMediaType? mediaType,
+    MediaItem? item,
     JobStatus? status,
     double? progress,
-    String? outputPath,
     String? errorMsg,
     DateTime? createdAt,
   }) {
@@ -37,9 +41,9 @@ class DownloadJob {
       id: id ?? this.id,
       url: url ?? this.url,
       mediaType: mediaType ?? this.mediaType,
+      item: item ?? this.item,
       status: status ?? this.status,
       progress: progress ?? this.progress,
-      outputPath: outputPath ?? this.outputPath,
       errorMsg: errorMsg ?? this.errorMsg,
       createdAt: createdAt ?? this.createdAt,
     );

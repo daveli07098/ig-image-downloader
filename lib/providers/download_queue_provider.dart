@@ -4,7 +4,7 @@ import '../models/download_job.dart';
 import '../services/downloader_service.dart';
 import '../services/ig_url_parser.dart';
 
-final _uuid = const Uuid();
+const _uuid = Uuid();
 
 // The live job queue — UI watches this
 final downloadQueueProvider =
@@ -13,44 +13,33 @@ final downloadQueueProvider =
 );
 
 class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
-  DownloadQueueNotifier(this._ref) : super([]);
+  DownloadQueueNotifier(Ref ref) : _ref = ref, super([]);
 
+  // ignore: unused_field
   final Ref _ref;
 
-  /// Enqueue a new URL. No-op if the same URL is already pending/downloading.
-  Future<void> enqueue(String rawUrl) async {
-    final url = rawUrl.trim();
-    if (url.isEmpty) return;
+  /// Enqueue specific [MediaItem]s from an IG post URL.
+  Future<void> enqueueItems(String igUrl, List<MediaItem> selectedItems) async {
+    final type = IgUrlParser.detect(igUrl);
+    final jobs = selectedItems.map((item) => DownloadJob(
+          id: _uuid.v4(),
+          url: igUrl,
+          mediaType: type,
+          item: item,
+          status: JobStatus.pending,
+          createdAt: DateTime.now(),
+        )).toList();
 
-    final alreadyExists = state.any(
-      (j) =>
-          j.url == url &&
-          (j.status == JobStatus.pending ||
-              j.status == JobStatus.downloading),
-    );
-    if (alreadyExists) return;
-
-    final job = DownloadJob(
-      id: _uuid.v4(),
-      url: url,
-      mediaType: IgUrlParser.detect(url),
-      status: JobStatus.pending,
-      createdAt: DateTime.now(),
-    );
-
-    state = [...state, job];
-    await _run(job.id);
+    state = [...state, ...jobs];
+    for (final job in jobs) {
+      _run(job.id);
+    }
   }
 
   Future<void> retry(String jobId) async {
     _updateJob(
       jobId,
-      (j) => j.copyWith(
-        status: JobStatus.pending,
-        progress: 0,
-        errorMsg: null,
-        outputPath: null,
-      ),
+      (j) => j.copyWith(status: JobStatus.pending, progress: 0, errorMsg: null),
     );
     await _run(jobId);
   }
@@ -61,11 +50,9 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
   void clearFinished() {
     state = state
-        .where(
-          (j) =>
-              j.status == JobStatus.pending ||
-              j.status == JobStatus.downloading,
-        )
+        .where((j) =>
+            j.status == JobStatus.pending ||
+            j.status == JobStatus.downloading)
         .toList();
   }
 
@@ -78,28 +65,15 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     final service = DownloaderService();
 
     try {
-      final outputPath = await service.download(
-        job.url,
+      await service.downloadItem(
+        job.item,
         onProgress: (progress) {
           _updateJob(jobId, (j) => j.copyWith(progress: progress));
         },
       );
-      _updateJob(
-        jobId,
-        (j) => j.copyWith(
-          status: JobStatus.done,
-          progress: 1.0,
-          outputPath: outputPath,
-        ),
-      );
+      _updateJob(jobId, (j) => j.copyWith(status: JobStatus.done, progress: 1.0));
     } catch (e) {
-      _updateJob(
-        jobId,
-        (j) => j.copyWith(
-          status: JobStatus.error,
-          errorMsg: e.toString(),
-        ),
-      );
+      _updateJob(jobId, (j) => j.copyWith(status: JobStatus.error, errorMsg: e.toString()));
     }
   }
 

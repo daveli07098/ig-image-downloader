@@ -33,8 +33,8 @@ class DownloadJobTile extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
             child: Row(
               children: [
-                // Type badge
-                _TypeBadge(type: job.mediaType),
+                // Thumbnail or type badge
+                _Thumbnail(job: job),
                 const SizedBox(width: 12),
 
                 // URL + progress text
@@ -81,11 +81,51 @@ class DownloadJobTile extends StatelessWidget {
   }
 }
 
+// ── Thumbnail widget ─────────────────────────────────────────────────────────
+
+class _Thumbnail extends StatelessWidget {
+  const _Thumbnail({required this.job});
+  final DownloadJob job;
+
+  @override
+  Widget build(BuildContext context) {
+    final thumbUrl = job.item.thumbnailUrl;
+    if (thumbUrl != null) {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Stack(
+          children: [
+            Image.network(
+              thumbUrl,
+              width: 52,
+              height: 52,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => _fallback(context),
+            ),
+            if (job.item.isVideo)
+              const Positioned(
+                bottom: 2, right: 2,
+                child: Icon(Icons.play_circle_fill_rounded,
+                    color: Colors.white, size: 16),
+              ),
+          ],
+        ),
+      );
+    }
+    return _fallback(context);
+  }
+
+  Widget _fallback(BuildContext context) {
+    return _TypeBadge(type: job.mediaType, isVideo: job.item.isVideo);
+  }
+}
+
 // ── Type badge / icon ────────────────────────────────────────────────────────
 
 class _TypeBadge extends StatelessWidget {
-  const _TypeBadge({required this.type});
+  const _TypeBadge({required this.type, this.isVideo});
   final IgMediaType type;
+  final bool? isVideo;
 
   @override
   Widget build(BuildContext context) {
@@ -93,7 +133,9 @@ class _TypeBadge extends StatelessWidget {
       IgMediaType.reel => (Icons.video_library_rounded, Colors.purple),
       IgMediaType.story => (Icons.auto_stories_rounded, Colors.orange),
       IgMediaType.igtv => (Icons.live_tv_rounded, Colors.deepPurple),
-      IgMediaType.post => (Icons.image_rounded, Colors.teal),
+      IgMediaType.post => isVideo == true
+          ? (Icons.video_file_rounded, Colors.teal)
+          : (Icons.image_rounded, Colors.teal),
       IgMediaType.unknown => (Icons.help_outline_rounded, Colors.grey),
     };
 
@@ -101,7 +143,7 @@ class _TypeBadge extends StatelessWidget {
       width: 44,
       height: 44,
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Icon(icon, color: color, size: 24),

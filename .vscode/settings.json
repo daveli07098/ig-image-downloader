@@ -5,5 +5,6 @@
   "github.copilot.chat.runCommand.enabled": true,
   "github.copilot.chat.edits.temporalContext.enabled": false,
   "github.copilot.chat.agent.thinkingTool.enabled": false,
-  "mcp.servers": {}
+  "mcp.servers": {},
+  "dart.flutterSdkPath": ".fvm/versions/stable"
 }

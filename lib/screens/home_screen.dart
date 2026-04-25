@@ -6,6 +6,7 @@ import '../providers/share_intent_provider.dart';
 import '../services/ig_url_parser.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
+import 'selection_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -19,35 +20,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _focusNode = FocusNode();
 
   @override
-  void initState() {
-    super.initState();
-    // Watch for URLs arriving via share intent after build
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      _listenForSharedUrl();
-    });
-  }
-
-  void _listenForSharedUrl() {
-    // Handled reactively in build via ref.listen
-  }
-
-  @override
   void dispose() {
     _controller.dispose();
     _focusNode.dispose();
     super.dispose();
   }
 
-  void _submit(String url) {
-    if (!IgUrlParser.isInstagramUrl(url)) {
+  void _openSelection(String url) {
+    final trimmed = url.trim();
+    if (!IgUrlParser.isInstagramUrl(trimmed)) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a valid Instagram URL')),
       );
       return;
     }
-    ref.read(downloadQueueProvider.notifier).enqueue(url);
     _controller.clear();
     _focusNode.unfocus();
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SelectionScreen(igUrl: trimmed),
+      ),
+    );
   }
 
   Future<void> _pasteFromClipboard() async {
@@ -55,20 +48,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final text = data?.text ?? '';
     if (text.isNotEmpty) {
       _controller.text = text;
-      _submit(text);
+      _openSelection(text);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    // Auto-enqueue when a URL arrives from the share sheet
+    // Auto-open SelectionScreen when a URL arrives from the share sheet
     ref.listen<String?>(sharedUrlProvider, (_, url) {
       if (url != null) {
-        ref.read(downloadQueueProvider.notifier).enqueue(url);
         ref.read(sharedUrlProvider.notifier).consume();
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('Downloading from: $url')),
-        );
+        _openSelection(url);
       }
     });
 
@@ -103,7 +93,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           _UrlInputBar(
             controller: _controller,
             focusNode: _focusNode,
-            onSubmit: _submit,
+            onSubmit: _openSelection,
             onPaste: _pasteFromClipboard,
           ),
 
@@ -154,7 +144,7 @@ class _UrlInputBar extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     return Container(
       padding: const EdgeInsets.all(16),
-      color: cs.surfaceContainerHighest.withOpacity(0.4),
+      color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
       child: Row(
         children: [
           Expanded(
@@ -212,8 +202,7 @@ class _EmptyHint extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              'Open a post, Reel, or IGTV in Instagram,\n'
-              'tap ⋯ → Share → IG Downloader',
+              'Open a post, Reel, or IGTV in Instagram,\ntap ⋯ → Share → IG Downloader\n\nPick which photos/videos to save.',  
               textAlign: TextAlign.center,
               style: Theme.of(context)
                   .textTheme
