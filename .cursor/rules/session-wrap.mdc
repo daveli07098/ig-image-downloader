@@ -1,0 +1,58 @@
+---
+description: Session wrap and changelog workflow — run after any meaningful agent session in ig-image-downloader
+alwaysApply: false
+---
+
+# ig-image-downloader — Cursor Rules
+
+## Project Context
+
+**ig-image-downloader** — A Flutter mobile app (Android / iOS) for downloading Instagram
+content (photos, videos, Reels, IGTV, multi-image carousel posts).
+
+Tech stack: Flutter (FVM stable), Dio, receive_sharing_intent, gal, open_filex,
+connectivity_plus, shared_preferences, Riverpod (StateNotifier).
+
+Run Flutter commands with FVM: `fvm flutter <command>` (`~/.nix-profile/bin/fvm`).
+Architecture: **[docs/architecture.md](../../docs/architecture.md)**
+
+## Auto-Commit Rule
+
+**If you edited or created any source file in this response → the FINAL action must be `git commit`. No exceptions.**
+
+### What triggers a commit:
+- Any file was edited or created
+- A feature implementation is complete
+- A bug fix is applied and verified
+
+### Commit checklist:
+```bash
+git add <changed files>
+git commit -m "type(scope): description"
+git rev-parse --short HEAD
+```
+
+### CHANGELOG format — dated session blocks:
+```markdown
+## [YYYY-MM-DD] — Session: <topic>
+### Added / Fixed / Changed / Maintenance
+- type(scope): what changed ([short-sha])
+```
+Create a new `## [YYYY-MM-DD]` block if today's date isn't already there.
+
+### Never:
+- Skip a commit because "more work is coming"
+- `git push` without explicit user request
+- `git push --force` without confirmation
+
+## Tool Restrictions
+
+Only use tools directly relevant to the task. Prefer file-reading and editing tools.
+Do not invoke browser, web, or MCP tools unless the user explicitly requests them.
+
+## Flutter Conventions
+
+- Analyze before finishing: `fvm flutter analyze lib`
+- All models use `copyWith()` — no direct field mutation
+- Riverpod: StateNotifier for mutable state, FutureProvider.family for async data
+- No global mutable singletons — pass providers / notifiers explicitly
