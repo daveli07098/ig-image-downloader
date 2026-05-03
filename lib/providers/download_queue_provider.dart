@@ -137,8 +137,7 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
           jobId,
           (j) => j.copyWith(
             status: JobStatus.error,
-            errorMsg:
-                'Wi-Fi only mode is on — connect to Wi-Fi to download.',
+            errorMsg: 'Wi-Fi only mode is on — connect to Wi-Fi to download.',
           ),
         );
         return;
@@ -150,24 +149,70 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     final job = state.firstWhere((j) => j.id == jobId);
     final service = DownloaderService();
 
-    try {
-      final savedPath = await service.downloadItem(
-        job.item,
-        onProgress: (progress) {
-          _updateJob(jobId, (j) => j.copyWith(progress: progress));
-        },
-      );
-      _updateJob(
-        jobId,
-        (j) => j.copyWith(
-          status: JobStatus.done,
-          progress: 1.0,
-          outputPath: savedPath,
-        ),
-      );
-    } catch (e) {
-      _updateJob(jobId, (j) => j.copyWith(status: JobStatus.error, errorMsg: e.toString()));
+    // Retry up to 3 times for transient network errors (DNS failure, timeout,
+    // connection reset) which happen when the app is backgrounded on Android.
+    const maxAttempts = 3;
+    for (var attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final savedPath = await service.downloadItem(
+          job.item,
+          onProgress: (progress) {
+            _updateJob(jobId, (j) => j.copyWith(progress: progress));
+          },
+        );
+        _updateJob(
+          jobId,
+          (j) => j.copyWith(
+            status: JobStatus.done,
+            progress: 1.0,
+            outputPath: savedPath,
+          ),
+        );
+        return; // success
+      } catch (e) {
+        final isNetworkError = _isTransientNetworkError(e.toString());
+        if (isNetworkError && attempt < maxAttempts) {
+          // Exponential backoff: 2s, 4s before retries
+          final backoff = Duration(seconds: attempt * 2);
+          _updateJob(
+            jobId,
+            (j) => j.copyWith(
+              progress: 0,
+              errorMsg: 'Network error, retrying ($attempt/$maxAttempts)…',
+            ),
+          );
+          await Future.delayed(backoff);
+          _updateJob(jobId, (j) => j.copyWith(errorMsg: null));
+        } else {
+          _updateJob(
+            jobId,
+            (j) => j.copyWith(
+              status: JobStatus.error,
+              errorMsg: e.toString(),
+            ),
+          );
+          return;
+        }
+      }
     }
+  }
+
+  /// Returns true for errors that are worth retrying automatically:
+  /// DNS lookup failures, connection resets, and timeouts — all common
+  /// when Android restricts network access for backgrounded apps.
+  static bool _isTransientNetworkError(String msg) {
+    const transient = [
+      'Failed host lookup',
+      'Connection reset',
+      'Connection refused',
+      'SocketException',
+      'connection error',
+      'ConnectTimeout',
+      'ReceiveTimeout',
+      'errno = 7',
+    ];
+    final lower = msg.toLowerCase();
+    return transient.any((t) => lower.contains(t.toLowerCase()));
   }
 
   void _updateJob(String id, DownloadJob Function(DownloadJob) updater) {
