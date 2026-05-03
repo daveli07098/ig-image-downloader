@@ -29,6 +29,26 @@ class MediaItem {
     return '${username}_${dateStr}_$itemIndex';
   }
 
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'mediaUrl': mediaUrl,
+        'thumbnailUrl': thumbnailUrl,
+        'type': type.name,
+        'username': username,
+        'itemIndex': itemIndex,
+        'postTimestamp': postTimestamp,
+      };
+
+  factory MediaItem.fromJson(Map<String, dynamic> j) => MediaItem(
+        id: j['id'] as String,
+        mediaUrl: j['mediaUrl'] as String,
+        thumbnailUrl: j['thumbnailUrl'] as String?,
+        type: j['type'] == 'video' ? MediaItemType.video : MediaItemType.image,
+        username: j['username'] as String? ?? 'unknown',
+        itemIndex: j['itemIndex'] as int? ?? 1,
+        postTimestamp: j['postTimestamp'] as int?,
+      );
+
   static String _formatDate(int? ts) {
     if (ts == null) {
       final now = DateTime.now();

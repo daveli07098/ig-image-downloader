@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'media_item.dart';
 
 export 'media_item.dart';
@@ -52,6 +54,38 @@ class DownloadJob {
       createdAt: createdAt ?? this.createdAt,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'url': url,
+        'mediaType': mediaType.name,
+        'item': item.toJson(),
+        'status': status.name,
+        'progress': progress,
+        'errorMsg': errorMsg,
+        'outputPath': outputPath,
+        'createdAt': createdAt.millisecondsSinceEpoch,
+      };
+
+  factory DownloadJob.fromJson(Map<String, dynamic> j) => DownloadJob(
+        id: j['id'] as String,
+        url: j['url'] as String,
+        mediaType: IgMediaType.values.firstWhere(
+          (e) => e.name == j['mediaType'],
+          orElse: () => IgMediaType.unknown,
+        ),
+        item: MediaItem.fromJson(
+            Map<String, dynamic>.from(j['item'] as Map)),
+        status: JobStatus.values.firstWhere(
+          (e) => e.name == j['status'],
+          orElse: () => JobStatus.error,
+        ),
+        progress: (j['progress'] as num?)?.toDouble() ?? 0,
+        errorMsg: j['errorMsg'] as String?,
+        outputPath: j['outputPath'] as String?,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+            j['createdAt'] as int),
+      );
 
   String get mediaTypeLabel {
     switch (mediaType) {

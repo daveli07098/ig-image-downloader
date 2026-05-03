@@ -1,8 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/download_job.dart';
 import '../services/downloader_service.dart';
@@ -19,8 +21,11 @@ final downloadQueueProvider =
 
 class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   DownloadQueueNotifier(Ref ref) : _ref = ref, super([]) {
+    _loadPersistedJobs();
     _watchConnectivity();
   }
+
+  static const _prefsKey = 'completed_jobs_v1';
 
   final Ref _ref;
   final _random = Random();
@@ -75,7 +80,53 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
     state = [...state, ...jobs];
     _pendingIds.addAll(jobs.map((j) => j.id));
+    _pruneFinished();
     _startWorker();
+  }
+
+  /// Keeps the queue tidy: finished (done/error) jobs older than 1 hour are
+  /// removed. Active (pending/downloading) jobs are never pruned.
+  void _pruneFinished() {
+    final cutoff = DateTime.now().subtract(const Duration(hours: 1));
+    state = state.where((j) {
+      if (j.status == JobStatus.pending || j.status == JobStatus.downloading) {
+        return true;
+      }
+      return j.createdAt.isAfter(cutoff);
+    }).toList();
+    _persistJobs();
+  }
+
+  /// Persist done/error jobs to SharedPreferences so they survive
+  /// Android process kills between shares.
+  Future<void> _persistJobs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final finished = state
+          .where((j) =>
+              j.status == JobStatus.done || j.status == JobStatus.error)
+          .map((j) => j.toJson())
+          .toList();
+      await prefs.setString(_prefsKey, jsonEncode(finished));
+    } catch (_) {}
+  }
+
+  /// Load persisted done/error jobs from SharedPreferences on startup,
+  /// discarding anything older than 1 hour.
+  Future<void> _loadPersistedJobs() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_prefsKey);
+      if (raw == null || raw.isEmpty) return;
+      final cutoff = DateTime.now().subtract(const Duration(hours: 1));
+      final loaded = (jsonDecode(raw) as List)
+          .map((e) => DownloadJob.fromJson(Map<String, dynamic>.from(e as Map)))
+          .where((j) => j.createdAt.isAfter(cutoff))
+          .toList();
+      if (loaded.isNotEmpty) {
+        state = [...loaded, ...state];
+      }
+    } catch (_) {}
   }
 
   Future<void> retry(String jobId) async {
@@ -168,6 +219,7 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
             outputPath: savedPath,
           ),
         );
+        _pruneFinished();
         return; // success
       } catch (e) {
         final isNetworkError = _isTransientNetworkError(e.toString());
