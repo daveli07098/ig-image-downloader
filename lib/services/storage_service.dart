@@ -3,21 +3,18 @@ import 'package:path_provider/path_provider.dart';
 
 /// Resolves the persistent download folder for saved IG media.
 ///
-/// Android : [getExternalStorageDirectory]/IG Downloader/YYYY-MM-DD/
-///           → visible in the device Files app under "Android/data/…"
-/// iOS     : [getApplicationDocumentsDirectory]/IG Downloader/YYYY-MM-DD/
-///           → visible in the iOS Files app under "On My iPhone → IG Downloader"
+/// Android : Downloads/ig_downloader/<username>/
+/// iOS     : Documents/ig_downloader/<username>/
 class StorageService {
   StorageService._();
 
-  static const _folderName = 'IG Downloader';
+  static const _folderName = 'ig_downloader';
 
-  /// Returns the date-stamped sub-directory for today's downloads,
-  /// creating it on disk if it doesn't exist yet.
-  static Future<Directory> getOrCreateSaveDir() async {
+  /// Returns the per-account sub-directory, creating it if needed.
+  static Future<Directory> getOrCreateSaveDir(String username) async {
     final base = await _baseDir();
-    final dateTag = _dateTag();
-    final dir = Directory('${base.path}/$_folderName/$dateTag');
+    final safe = _safeName(username);
+    final dir = Directory('${base.path}/$_folderName/$safe');
     if (!dir.existsSync()) {
       await dir.create(recursive: true);
     }
@@ -45,11 +42,9 @@ class StorageService {
     return getApplicationDocumentsDirectory();
   }
 
-  static String _dateTag() {
-    final now = DateTime.now();
-    return '${now.year}-'
-        '${now.month.toString().padLeft(2, '0')}-'
-        '${now.day.toString().padLeft(2, '0')}';
+  static String _safeName(String username) {
+    // Strip any chars that aren't safe for folder names
+    return username.replaceAll(RegExp(r'[^A-Za-z0-9._\-]'), '_');
   }
 
   /// Human-readable label for displaying the save location.

@@ -218,10 +218,12 @@ class _EmptyHint extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Expanded(
-      child: Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
+      child: SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(vertical: 32, horizontal: 24),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
             Icon(Icons.share_outlined, size: 72, color: cs.primary),
             const SizedBox(height: 16),
             Text(
@@ -247,6 +249,6 @@ class _EmptyHint extends StatelessWidget {
           ],
         ),
       ),
-    );
+    ));
   }
 }
