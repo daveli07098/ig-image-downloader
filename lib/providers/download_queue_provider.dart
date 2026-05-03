@@ -21,16 +21,23 @@ final downloadQueueProvider =
 
 class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   DownloadQueueNotifier(Ref ref) : _ref = ref, super([]) {
-    _loadPersistedJobs();
     _watchConnectivity();
+    // Signal completes when persisted jobs are loaded — enqueueItems awaits it
+    // so new shares never race against the initial load.
+    _loadCompleter = Completer<void>();
+    _loadPersistedJobs().then((_) {
+      if (!_loadCompleter.isCompleted) _loadCompleter.complete();
+    }).catchError((_) {
+      if (!_loadCompleter.isCompleted) _loadCompleter.complete();
+    });
   }
 
-  static const _prefsKey = 'completed_jobs_v1';
+  static const _prefsKey = 'job_queue_v2';
 
   final Ref _ref;
   final _random = Random();
+  late final Completer<void> _loadCompleter;
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
-  // Sequential download queue — one job at a time, with a pause between each
   bool _isRunning = false;
   final _pendingIds = <String>[];
 
@@ -68,6 +75,10 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   /// Jobs are added to the sequential queue and downloaded one at a time
   /// with a random 1–3 s pause between each to avoid rate-limiting.
   Future<void> enqueueItems(String igUrl, List<MediaItem> selectedItems) async {
+    // Ensure persisted jobs are loaded first so they are never clobbered
+    // by a new share arriving during the async SharedPreferences read.
+    await _loadCompleter.future;
+
     final type = IgUrlParser.detect(igUrl);
     final jobs = selectedItems.map((item) => DownloadJob(
           id: _uuid.v4(),
@@ -80,7 +91,8 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
     state = [...state, ...jobs];
     _pendingIds.addAll(jobs.map((j) => j.id));
-    _pruneFinished();
+    _pruneFinished();   // removes finished jobs >1h old, calls _persistJobs
+    _persistJobs();     // also persist the new pending jobs immediately
     _startWorker();
   }
 
@@ -97,34 +109,54 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     _persistJobs();
   }
 
-  /// Persist done/error jobs to SharedPreferences so they survive
-  /// Android process kills between shares.
+  /// Persist all jobs so they survive Android process kills between shares.
+  /// In-progress downloads are saved as pending so they can be retried.
   Future<void> _persistJobs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final finished = state
-          .where((j) =>
-              j.status == JobStatus.done || j.status == JobStatus.error)
-          .map((j) => j.toJson())
-          .toList();
-      await prefs.setString(_prefsKey, jsonEncode(finished));
+      final toSave = state.map((j) {
+        // Treat downloading as pending so it shows as resumable on restart
+        if (j.status == JobStatus.downloading) {
+          return j.copyWith(status: JobStatus.pending, progress: 0);
+        }
+        return j;
+      }).map((j) => j.toJson()).toList();
+      await prefs.setString(_prefsKey, jsonEncode(toSave));
     } catch (_) {}
   }
 
-  /// Load persisted done/error jobs from SharedPreferences on startup,
-  /// discarding anything older than 1 hour.
+  /// Load persisted jobs on startup. Pending jobs were queued when the app
+  /// was killed — restore them as errors with "Interrupted" so the user
+  /// can see them and tap retry to re-queue individually.
   Future<void> _loadPersistedJobs() async {
     try {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_prefsKey);
       if (raw == null || raw.isEmpty) return;
       final cutoff = DateTime.now().subtract(const Duration(hours: 1));
+      final existingIds = state.map((j) => j.id).toSet();
+      final toRetry = <String>[];
       final loaded = (jsonDecode(raw) as List)
           .map((e) => DownloadJob.fromJson(Map<String, dynamic>.from(e as Map)))
           .where((j) => j.createdAt.isAfter(cutoff))
+          // Skip jobs already in state (e.g. process wasn't killed)
+          .where((j) => !existingIds.contains(j.id))
+          .map((j) {
+            // Auto-retry interrupted pending/downloading jobs — no user tap needed
+            if (j.status == JobStatus.pending ||
+                j.status == JobStatus.downloading) {
+              toRetry.add(j.id);
+              return j.copyWith(status: JobStatus.pending, progress: 0, errorMsg: null);
+            }
+            return j;
+          })
           .toList();
       if (loaded.isNotEmpty) {
         state = [...loaded, ...state];
+        if (toRetry.isNotEmpty) {
+          _pendingIds.insertAll(0, toRetry);
+          _startWorker();
+        }
       }
     } catch (_) {}
   }
