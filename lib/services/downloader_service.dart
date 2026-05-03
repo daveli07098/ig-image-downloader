@@ -97,32 +97,39 @@ class DownloaderService {
     }
 
     final username = (_dig(item, ['user', 'username']) as String?) ?? 'unknown';
-    debugPrint('[IG] username: $username');
+    final postTimestamp = (item['taken_at'] as num?)?.toInt();
+    debugPrint('[IG] username: $username, taken_at: $postTimestamp');
 
     // Carousel post: carousel_media array
     final carouselList = item['carousel_media'];
     if (carouselList is List && carouselList.isNotEmpty) {
       debugPrint('[IG] carousel_media: ${carouselList.length} slides');
-      return _extractFromSlides(carouselList.cast<Map<String, dynamic>>(), username);
+      return _extractFromSlides(
+        carouselList.cast<Map<String, dynamic>>(),
+        username,
+        postTimestamp: postTimestamp,
+      );
     }
 
     // Single post
-    return _extractFromSlides([item], username);
+    return _extractFromSlides([item], username, postTimestamp: postTimestamp);
   }
 
   /// Extracts MediaItems from a list of Instagram media nodes
   /// (each node has image_versions2 and optionally video_versions).
   List<MediaItem> _extractFromSlides(
-      List<Map<String, dynamic>> slides, String username) {
+      List<Map<String, dynamic>> slides, String username,
+      {int? postTimestamp}) {
     final items = <MediaItem>[];
     for (var i = 0; i < slides.length; i++) {
       final slide = slides[i];
+      // Use the slide's own taken_at if available, else the post's
+      final ts = (slide['taken_at'] as num?)?.toInt() ?? postTimestamp;
       final isVideo = slide['media_type'] == 2 ||
           (slide['video_versions'] != null &&
               (slide['video_versions'] as List).isNotEmpty);
 
       if (isVideo) {
-        // video_versions: sorted highest quality first
         final versions = slide['video_versions'] as List?;
         final videoUrl = versions != null && versions.isNotEmpty
             ? (versions.first as Map<String, dynamic>)['url'] as String?
@@ -135,10 +142,11 @@ class DownloaderService {
             thumbnailUrl: thumbUrl,
             type: MediaItemType.video,
             username: username,
+            itemIndex: i + 1,
+            postTimestamp: ts,
           ));
         }
       } else {
-        // image_versions2.candidates: sorted highest resolution first
         final imageUrl = _bestImageUrl(slide);
         if (imageUrl != null) {
           items.add(MediaItem(
@@ -147,6 +155,8 @@ class DownloaderService {
             thumbnailUrl: imageUrl,
             type: MediaItemType.image,
             username: username,
+            itemIndex: i + 1,
+            postTimestamp: ts,
           ));
         }
       }
@@ -210,6 +220,7 @@ class DownloaderService {
           thumbnailUrl: i < images.length ? images[i] : null,
           type: MediaItemType.video,
           username: username,
+          itemIndex: i + 1,
         ));
       }
       for (var i = videos.length; i < images.length; i++) {
@@ -219,6 +230,7 @@ class DownloaderService {
           thumbnailUrl: images[i],
           type: MediaItemType.image,
           username: username,
+          itemIndex: i + 1,
         ));
       }
     } else {
@@ -229,6 +241,7 @@ class DownloaderService {
           thumbnailUrl: images[i],
           type: MediaItemType.image,
           username: username,
+          itemIndex: i + 1,
         ));
       }
     }
@@ -293,8 +306,7 @@ class DownloaderService {
   }) async {
     final ext = item.isVideo ? 'mp4' : 'jpg';
     final saveDir = await StorageService.getOrCreateSaveDir(item.username);
-    final ts = DateTime.now().millisecondsSinceEpoch;
-    final filename = '${item.username}_${ts}_${item.id}.$ext';
+    final filename = '${item.filenameBase}.$ext';
     final savePath = '${saveDir.path}/$filename';
 
     await _dio.download(
