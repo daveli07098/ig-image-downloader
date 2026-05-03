@@ -44,6 +44,9 @@ dependencies:
   # Persistent user settings (WiFi-only toggle, etc.)
   shared_preferences: ^2.3.3
 
+  # In-app WebView for Instagram login (session cookie extraction)
+  webview_flutter: ^4.10.0
+
   # UI extras
   flutter_svg: ^2.0.10+1
 

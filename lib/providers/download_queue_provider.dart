@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,7 +23,11 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   }
 
   final Ref _ref;
+  final _random = Random();
   StreamSubscription<List<ConnectivityResult>>? _connectivitySub;
+  // Sequential download queue — one job at a time, with a pause between each
+  bool _isRunning = false;
+  final _pendingIds = <String>[];
 
   // When Wi-Fi reconnects and wifiOnly mode is on, automatically retry
   // any jobs that were blocked by the Wi-Fi gate.
@@ -55,6 +60,8 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   }
 
   /// Enqueue specific [MediaItem]s from an IG post URL.
+  /// Jobs are added to the sequential queue and downloaded one at a time
+  /// with a random 1–3 s pause between each to avoid rate-limiting.
   Future<void> enqueueItems(String igUrl, List<MediaItem> selectedItems) async {
     final type = IgUrlParser.detect(igUrl);
     final jobs = selectedItems.map((item) => DownloadJob(
@@ -67,9 +74,8 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
         )).toList();
 
     state = [...state, ...jobs];
-    for (final job in jobs) {
-      _run(job.id);
-    }
+    _pendingIds.addAll(jobs.map((j) => j.id));
+    _startWorker();
   }
 
   Future<void> retry(String jobId) async {
@@ -77,7 +83,33 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
       jobId,
       (j) => j.copyWith(status: JobStatus.pending, progress: 0, errorMsg: null),
     );
-    await _run(jobId);
+    _pendingIds.add(jobId);
+    _startWorker();
+  }
+
+  /// Starts the sequential worker loop if not already running.
+  void _startWorker() {
+    if (_isRunning) return;
+    _isRunning = true;
+    _runNext();
+  }
+
+  /// Processes pending jobs one at a time with a pause between each.
+  Future<void> _runNext() async {
+    while (_pendingIds.isNotEmpty) {
+      final jobId = _pendingIds.removeAt(0);
+      // Job may have been removed from state while queued
+      if (!state.any((j) => j.id == jobId)) continue;
+
+      await _run(jobId);
+
+      // Pause between downloads — random 1–3 s to avoid rate-limiting
+      if (_pendingIds.isNotEmpty) {
+        final pauseMs = 1000 + _random.nextInt(2000);
+        await Future.delayed(Duration(milliseconds: pauseMs));
+      }
+    }
+    _isRunning = false;
   }
 
   void remove(String jobId) {

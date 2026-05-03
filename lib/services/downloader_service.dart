@@ -1,23 +1,36 @@
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
-import 'package:gal/gal.dart';
+import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
+import 'session_service.dart';
 import 'storage_service.dart';
 
 /// Fetches an Instagram page, extracts all media items (carousel-aware),
-/// and downloads selected items to the device gallery.
+/// and downloads selected items to the public Downloads folder.
+/// Files are registered with Android's MediaScanner so they appear in the
+/// media browser without being duplicated into Pictures.
 ///
 /// Extraction strategy (in order):
-///   1. Embed page → window.__additionalDataLoaded JSON
-///      (gives image_versions2/video_versions with full carousel)
+///   0. Instagram private API — i.instagram.com (requires session cookie)
+///      Full carousel, original resolution, full video
+///   1. Embed page → window.__additionalDataLoaded JSON (public posts, limited)
 ///   2. Main page OG tags + display_url JSON fallback (single posts)
 class DownloaderService {
   static const _crawlerUA =
       'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
-  final Dio _dio;
+  // Instagram Android app user-agent — required for the private API
+  static const _mobileUA =
+      'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; '
+      'OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)';
+
+  // Web client app ID accepted by i.instagram.com without an app-level token
+  static const _igAppId = '936619743392459';
+
+  final Dio _dio;    // HTML page fetching (crawler UA)
+  final Dio _apiDio; // Instagram private API (mobile UA + App-ID)
 
   DownloaderService({Dio? dio})
       : _dio = dio ??
@@ -31,22 +44,62 @@ class DownloaderService {
                   'Referer': 'https://www.instagram.com/',
                 },
               ),
-            );
+            ),
+        _apiDio = Dio(
+          BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+            headers: {
+              'User-Agent': _mobileUA,
+              'X-IG-App-ID': _igAppId,
+              'X-IG-Capabilities': '3brTvwE=',
+              'X-IG-Connection-Type': 'WIFI',
+              'Accept-Language': 'en-US',
+              'Accept': 'application/json',
+            },
+          ),
+        );
 
   // ── 1.  Fetch all media items from an IG URL ───────────────────────────
 
   Future<List<MediaItem>> fetchItems(String igUrl) async {
     // Normalise: strip query string, ensure trailing slash
-    final cleanUrl = igUrl.split('?').first.trimRight('/') + '/';
+    final cleanUrl = igUrl.split('?').first.replaceAll(RegExp(r'/+$'), '') + '/';
     debugPrint('[IG] URL: $cleanUrl');
 
+    // Attach session cookie if the user has logged in
+    final sessionId = await SessionService.getSessionId();
+    debugPrint('[IG] sessionId: ${sessionId != null ? 'SET (${sessionId.length} chars)' : 'NULL — not logged in'}');
+    final cookieHeader =
+        sessionId != null ? 'sessionid=$sessionId' : null;
+
+    // ── Strategy 0: Instagram private API (requires login) ───────────────
+    // Returns full carousel + original resolution for any public/private post
+    if (sessionId != null) {
+      final shortcode = _extractShortcode(cleanUrl);
+      if (shortcode != null) {
+        try {
+          final items = await _fetchViaPrivateApi(shortcode, sessionId);
+          if (items.isNotEmpty) {
+            debugPrint('[IG] Private API succeeded: ${items.length} items');
+            return items;
+          }
+        } catch (e) {
+          debugPrint('[IG] Private API failed: $e');
+        }
+      }
+    }
+
     // ── Strategy A: embed captioned page ────────────────────────────────
-    // The embed page serves window.__additionalDataLoaded(...) with the
-    // full carousel (image_versions2 + video_versions per slide).
     try {
       final embedUrl = '${cleanUrl}embed/captioned/';
       debugPrint('[IG] Trying embed: $embedUrl');
-      final resp = await _dio.get<String>(embedUrl);
+      final resp = await _dio.get<String>(
+        embedUrl,
+        options: cookieHeader != null
+            ? Options(headers: {'Cookie': cookieHeader})
+            : null,
+      );
       if (resp.statusCode == 200 && resp.data != null) {
         final items = _parseEmbedPage(resp.data!, cleanUrl);
         if (items.isNotEmpty) {
@@ -58,16 +111,82 @@ class DownloaderService {
       debugPrint('[IG] Embed failed: $e');
     }
 
-    // ── Strategy B: main page with crawler UA (OG tags + JSON blobs) ─────
+    // ── Strategy B: main page ─────────────────────────────────────────────
     debugPrint('[IG] Falling back to main page');
-    final resp = await _dio.get<String>(cleanUrl);
+    final resp = await _dio.get<String>(
+      cleanUrl,
+      options: cookieHeader != null
+          ? Options(headers: {'Cookie': cookieHeader})
+          : null,
+    );
     if (resp.statusCode != 200 || resp.data == null) {
       throw Exception('Failed to load Instagram page (${resp.statusCode})');
     }
     return _parseMainPage(resp.data!, cleanUrl);
   }
 
-  // ── Strategy A: embed page ──────────────────────────────────────────────
+  // ── Strategy 0: Instagram private API ──────────────────────────────────
+
+  /// Extracts the shortcode from an Instagram URL.
+  /// Handles /p/, /reel/, /tv/ paths.
+  static String? _extractShortcode(String url) {
+    final re = RegExp(r'instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)');
+    return re.firstMatch(url)?.group(1);
+  }
+
+  /// Converts an Instagram URL shortcode to its numeric media ID.
+  /// Instagram uses a URL-safe base64 alphabet over 64-value digits.
+  /// Uses BigInt to safely handle IDs larger than 2^53.
+  static String _shortcodeToId(String shortcode) {
+    const alphabet =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    var id = BigInt.zero;
+    for (final c in shortcode.split('')) {
+      final idx = alphabet.indexOf(c);
+      if (idx < 0) continue;
+      id = id * BigInt.from(64) + BigInt.from(idx);
+    }
+    return id.toString();
+  }
+
+  Future<List<MediaItem>> _fetchViaPrivateApi(
+      String shortcode, String sessionId) async {
+    final mediaId = _shortcodeToId(shortcode);
+    final url = 'https://i.instagram.com/api/v1/media/$mediaId/info/';
+    debugPrint('[IG] Private API: $url');
+
+    final resp = await _apiDio.get<String>(
+      url,
+      options: Options(headers: {'Cookie': 'sessionid=$sessionId'}),
+    );
+
+    if (resp.statusCode != 200 || resp.data == null) return [];
+
+    final data = jsonDecode(resp.data!) as Map<String, dynamic>;
+    final item = _dig(data, ['items', 0]) as Map<String, dynamic>?;
+    if (item == null) return [];
+
+    final username =
+        (_dig(item, ['user', 'username']) as String?) ?? 'unknown';
+    final postTimestamp = (item['taken_at'] as num?)?.toInt();
+
+    final carouselList = item['carousel_media'];
+    if (carouselList is List && carouselList.isNotEmpty) {
+      debugPrint('[IG] Private API carousel: ${carouselList.length} slides');
+      return _extractFromSlides(
+        carouselList.cast<Map<String, dynamic>>(),
+        username,
+        postTimestamp: postTimestamp,
+      );
+    }
+
+    debugPrint('[IG] Private API single item');
+    return _extractFromSlides(
+      [item],
+      username,
+      postTimestamp: postTimestamp,
+    );
+  }
 
   List<MediaItem> _parseEmbedPage(String html, String pageUrl) {
     // window.__additionalDataLoaded('extra', {...});
@@ -298,8 +417,12 @@ class DownloaderService {
 
   // ── 2.  Download a single MediaItem ───────────────────────────────────
 
-  /// Downloads [item] directly to the persistent save folder and also saves
-  /// it to the device gallery. Returns the permanent file path.
+  static const _mediaScannerChannel =
+      MethodChannel('ig_downloader/media_scanner');
+
+  /// Downloads [item] to the per-account folder inside public Downloads,
+  /// then notifies Android's media scanner so it appears in the media browser
+  /// without being duplicated into Pictures. Returns the saved file path.
   Future<String> downloadItem(
     MediaItem item, {
     required void Function(double progress) onProgress,
@@ -308,32 +431,33 @@ class DownloaderService {
     final saveDir = await StorageService.getOrCreateSaveDir(item.username);
     final filename = '${item.filenameBase}.$ext';
     final savePath = '${saveDir.path}/$filename';
+    debugPrint('[IG] savePath: $savePath');
 
+    final sessionId = await SessionService.getSessionId();
     await _dio.download(
       item.mediaUrl,
       savePath,
+      options: sessionId != null
+          ? Options(headers: {'Cookie': 'sessionid=$sessionId'})
+          : null,
       onReceiveProgress: (received, total) {
         if (total > 0) onProgress(received / total);
       },
     );
 
-    // Request gallery permission on first save (required on both platforms).
-    // gal throws GalException.accessDenied if permission is not granted.
-    if (!await Gal.hasAccess()) {
-      final granted = await Gal.requestAccess();
-      if (!granted) {
-        throw Exception(
-          'Gallery permission denied. '
-          'Please allow Photos access in Settings to save media.',
-        );
+    // Tell Android's MediaStore about the new file so it shows up in the
+    // media browser (gallery apps, Files app) immediately, without copying
+    // it into Pictures.
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      final mimeType = item.isVideo ? 'video/mp4' : 'image/jpeg';
+      try {
+        await _mediaScannerChannel.invokeMethod('scanFile', {
+          'path': savePath,
+          'mimeType': mimeType,
+        });
+      } catch (e) {
+        debugPrint('[IG] MediaScanner failed (non-fatal): $e');
       }
-    }
-
-    // Also add to the device gallery so it appears in Photos / Gallery app.
-    if (item.isVideo) {
-      await Gal.putVideo(savePath);
-    } else {
-      await Gal.putImage(savePath);
     }
 
     return savePath;

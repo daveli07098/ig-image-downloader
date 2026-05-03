@@ -5,8 +5,10 @@ import '../providers/download_queue_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/share_intent_provider.dart';
 import '../services/ig_url_parser.dart';
+import '../services/session_service.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
+import 'login_screen.dart';
 import 'selection_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -19,6 +21,13 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
+  bool _isLoggedIn = false;
+
+  @override
+  void initState() {
+    super.initState();
+    SessionService.isLoggedIn().then((v) => setState(() => _isLoggedIn = v));
+  }
 
   @override
   void dispose() {
@@ -80,6 +89,39 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ],
         ),
         actions: [
+          // IG login / logout
+          IconButton(
+            icon: Icon(
+              _isLoggedIn
+                  ? Icons.account_circle
+                  : Icons.account_circle_outlined,
+              color: _isLoggedIn
+                  ? Theme.of(context).colorScheme.primary
+                  : null,
+            ),
+            tooltip: _isLoggedIn
+                ? 'Logged in to Instagram — tap to logout'
+                : 'Login to Instagram',
+            onPressed: () async {
+              if (_isLoggedIn) {
+                await SessionService.clearSession();
+                setState(() => _isLoggedIn = false);
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Logged out of Instagram'),
+                      duration: Duration(seconds: 2),
+                    ),
+                  );
+                }
+              } else {
+                final result = await Navigator.of(context).push<bool>(
+                  MaterialPageRoute(builder: (_) => const LoginScreen()),
+                );
+                if (result == true) setState(() => _isLoggedIn = true);
+              }
+            },
+          ),
           // Wi-Fi only toggle
           IconButton(
             icon: Icon(
