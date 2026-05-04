@@ -81,11 +81,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.download_rounded,
                 color: Theme.of(context).colorScheme.primary),
             const SizedBox(width: 8),
-            const Text('IG Downloader'),
+            const Flexible(child: Text('IG Downloader', overflow: TextOverflow.ellipsis)),
           ],
         ),
         actions: [
