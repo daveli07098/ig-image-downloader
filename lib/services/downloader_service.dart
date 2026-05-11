@@ -6,6 +6,7 @@ import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
 import 'session_service.dart';
 import 'storage_service.dart';
+import 'x_downloader_service.dart';
 
 /// Fetches an Instagram page, extracts all media items (carousel-aware),
 /// and downloads selected items to the public Downloads folder.
@@ -60,9 +61,16 @@ class DownloaderService {
           ),
         );
 
-  // ── 1.  Fetch all media items from an IG URL ───────────────────────────
+  // ── 1.  Fetch all media items from a URL (IG or X) ──────────────────────
 
-  Future<List<MediaItem>> fetchItems(String igUrl) async {
+  Future<List<MediaItem>> fetchItems(String url) async {
+    if (XDownloaderService.isXUrl(url)) {
+      return XDownloaderService().fetchItems(url);
+    }
+    return _fetchIgItems(url);
+  }
+
+  Future<List<MediaItem>> _fetchIgItems(String igUrl) async {
     // Normalise: strip query string, ensure trailing slash
     final cleanUrl = igUrl.split('?').first.replaceAll(RegExp(r'/+$'), '') + '/';
     debugPrint('[IG] URL: $cleanUrl');
@@ -434,10 +442,14 @@ class DownloaderService {
     debugPrint('[IG] savePath: $savePath');
 
     final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
+    // Only send Instagram cookies for Instagram CDN URLs
+    final isIgCdn = item.mediaUrl.contains('cdninstagram.com') ||
+        item.mediaUrl.contains('instagram.com') ||
+        item.mediaUrl.contains('fbcdn.net');
     await _dio.download(
       item.mediaUrl,
       savePath,
-      options: sessionId != null
+      options: (sessionId != null && isIgCdn)
           ? Options(headers: {'Cookie': 'sessionid=$sessionId'})
           : null,
       onReceiveProgress: (received, total) {

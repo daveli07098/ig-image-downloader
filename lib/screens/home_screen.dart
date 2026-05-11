@@ -5,6 +5,7 @@ import '../providers/download_queue_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/share_intent_provider.dart';
 import '../services/ig_url_parser.dart';
+import '../services/x_downloader_service.dart';
 import '../services/session_service.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
@@ -45,9 +46,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _openSelection(String url) {
     final trimmed = url.trim();
-    if (!IgUrlParser.isInstagramUrl(trimmed)) {
+    if (!IgUrlParser.isInstagramUrl(trimmed) &&
+        !XDownloaderService.isXUrl(trimmed)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter a valid Instagram URL')),
+        const SnackBar(
+            content: Text('Please enter a valid Instagram or X (Twitter) URL')),
       );
       return;
     }
@@ -246,7 +249,7 @@ class _UrlInputBar extends StatelessWidget {
               controller: controller,
               focusNode: focusNode,
               decoration: InputDecoration(
-                hintText: 'Paste Instagram URL…',
+                hintText: 'Paste Instagram or X URL…',
                 prefixIcon: const Icon(Icons.link),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.clear),
@@ -293,12 +296,12 @@ class _EmptyHint extends StatelessWidget {
             Icon(Icons.share_outlined, size: 72, color: cs.primary),
             const SizedBox(height: 16),
             Text(
-              'Share from Instagram',
+              'Share from Instagram or X',
               style: Theme.of(context).textTheme.headlineSmall,
             ),
             const SizedBox(height: 8),
             Text(
-              'Open a post, Reel, or IGTV in Instagram,\ntap ⋯ → Share → IG Downloader\n\nPick which photos/videos to save.',  
+              'Instagram: open a post, Reel, or IGTV,\ntap ⋯ → Share → IG Downloader\n\nX (Twitter): tap Share → IG Downloader\n\nPick which photos/videos to save.',
               textAlign: TextAlign.center,
               style: Theme.of(context)
                   .textTheme

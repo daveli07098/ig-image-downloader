@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../models/download_job.dart';
 import '../services/downloader_service.dart';
 import '../services/ig_url_parser.dart';
+import '../services/x_downloader_service.dart';
 import 'settings_provider.dart';
 
 const _uuid = Uuid();
@@ -71,18 +72,20 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     super.dispose();
   }
 
-  /// Enqueue specific [MediaItem]s from an IG post URL.
+  /// Enqueue specific [MediaItem]s from a post URL (Instagram or X).
   /// Jobs are added to the sequential queue and downloaded one at a time
   /// with a random 1–3 s pause between each to avoid rate-limiting.
-  Future<void> enqueueItems(String igUrl, List<MediaItem> selectedItems) async {
+  Future<void> enqueueItems(String postUrl, List<MediaItem> selectedItems) async {
     // Ensure persisted jobs are loaded first so they are never clobbered
     // by a new share arriving during the async SharedPreferences read.
     await _loadCompleter.future;
 
-    final type = IgUrlParser.detect(igUrl);
+    final type = XDownloaderService.isXUrl(postUrl)
+        ? IgMediaType.xPost
+        : IgUrlParser.detect(postUrl);
     final jobs = selectedItems.map((item) => DownloadJob(
           id: _uuid.v4(),
-          url: igUrl,
+          url: postUrl,
           mediaType: type,
           item: item,
           status: JobStatus.pending,

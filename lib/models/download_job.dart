@@ -4,7 +4,7 @@ import 'media_item.dart';
 
 export 'media_item.dart';
 
-enum IgMediaType { post, reel, story, igtv, unknown }
+enum IgMediaType { post, reel, story, igtv, unknown, xPost }
 
 enum JobStatus { pending, downloading, done, error }
 
@@ -99,6 +99,8 @@ class DownloadJob {
         return 'IGTV';
       case IgMediaType.unknown:
         return 'IG';
+      case IgMediaType.xPost:
+        return 'X Post';
     }
   }
 }

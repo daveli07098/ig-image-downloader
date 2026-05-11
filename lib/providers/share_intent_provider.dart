@@ -2,7 +2,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:receive_sharing_intent/receive_sharing_intent.dart';
 import 'dart:async';
 
-/// Provides the latest Instagram URL shared from another app (e.g. Instagram).
+/// Provides the latest Instagram or X (Twitter) URL shared from another app.
 /// Returns null when no URL has been received yet.
 final sharedUrlProvider =
     StateNotifierProvider<SharedUrlNotifier, String?>((ref) {
@@ -30,7 +30,9 @@ class SharedUrlNotifier extends StateNotifier<String?> {
   void _handleMedia(List<SharedMediaFile> files) {
     if (files.isEmpty) return;
     final text = files.first.path; // receive_sharing_intent puts text in path
-    if (text.contains('instagram.com')) {
+    if (text.contains('instagram.com') ||
+        text.contains('x.com/') ||
+        text.contains('twitter.com/')) {
       state = text;
     }
   }

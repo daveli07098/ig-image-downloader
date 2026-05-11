@@ -139,6 +139,7 @@ class _TypeBadge extends StatelessWidget {
           ? (Icons.video_file_rounded, Colors.teal)
           : (Icons.image_rounded, Colors.teal),
       IgMediaType.unknown => (Icons.help_outline_rounded, Colors.grey),
+      IgMediaType.xPost => (Icons.close, Colors.black87),
     };
 
     return Container(
