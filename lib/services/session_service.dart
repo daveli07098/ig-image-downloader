@@ -1,29 +1,35 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
-/// Persists the Instagram `sessionid` cookie so it survives app restarts.
-/// The cookie is injected into every Dio request via [DownloaderService].
+/// Supported login platforms.
+enum LoginPlatform { instagram, x }
+
+/// Persists session cookies for multiple platforms so they survive app restarts.
+/// The relevant cookie is injected into Dio requests via [DownloaderService].
 class SessionService {
   SessionService._();
 
-  static const _key = 'ig_sessionid';
+  static const _keys = {
+    LoginPlatform.instagram: 'ig_sessionid',
+    LoginPlatform.x: 'x_auth_token',
+  };
 
-  static Future<String?> getSessionId() async {
+  static Future<String?> getSessionId(LoginPlatform platform) async {
     final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_key);
+    return prefs.getString(_keys[platform]!);
   }
 
-  static Future<void> saveSessionId(String sessionId) async {
+  static Future<void> saveSessionId(LoginPlatform platform, String sessionId) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString(_key, sessionId);
+    await prefs.setString(_keys[platform]!, sessionId);
   }
 
-  static Future<void> clearSession() async {
+  static Future<void> clearSession(LoginPlatform platform) async {
     final prefs = await SharedPreferences.getInstance();
-    await prefs.remove(_key);
+    await prefs.remove(_keys[platform]!);
   }
 
-  static Future<bool> isLoggedIn() async {
-    final sid = await getSessionId();
+  static Future<bool> isLoggedIn(LoginPlatform platform) async {
+    final sid = await getSessionId(platform);
     return sid != null && sid.isNotEmpty;
   }
 }

@@ -21,12 +21,19 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _controller = TextEditingController();
   final _focusNode = FocusNode();
-  bool _isLoggedIn = false;
+  bool _igLoggedIn = false;
+  bool _xLoggedIn = false;
 
   @override
   void initState() {
     super.initState();
-    SessionService.isLoggedIn().then((v) => setState(() => _isLoggedIn = v));
+    _refreshLoginState();
+  }
+
+  Future<void> _refreshLoginState() async {
+    final ig = await SessionService.isLoggedIn(LoginPlatform.instagram);
+    final x = await SessionService.isLoggedIn(LoginPlatform.x);
+    if (mounted) setState(() { _igLoggedIn = ig; _xLoggedIn = x; });
   }
 
   @override
@@ -62,6 +69,42 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  Future<void> _showAccountsSheet(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (_) => _AccountsSheet(
+        igLoggedIn: _igLoggedIn,
+        xLoggedIn: _xLoggedIn,
+        onLogin: (platform) async {
+          final nav = Navigator.of(context);
+          nav.pop();
+          final result = await nav.push<bool>(
+            MaterialPageRoute(
+              builder: (_) => LoginScreen(platform: platform),
+            ),
+          );
+          if (result == true) _refreshLoginState();
+        },
+        onLogout: (platform) async {
+          final messenger = ScaffoldMessenger.of(context);
+          await SessionService.clearSession(platform);
+          _refreshLoginState();
+          if (!mounted) return;
+          const labels = {LoginPlatform.instagram: 'Instagram', LoginPlatform.x: 'X'};
+          messenger.showSnackBar(
+            SnackBar(
+              content: Text('Logged out of ${labels[platform]}'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        },
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Auto-open SelectionScreen when a URL arrives from the share sheet
@@ -90,38 +133,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           ],
         ),
         actions: [
-          // IG login / logout
+          // Multi-platform accounts button
           IconButton(
             icon: Icon(
-              _isLoggedIn
+              (_igLoggedIn || _xLoggedIn)
                   ? Icons.account_circle
                   : Icons.account_circle_outlined,
-              color: _isLoggedIn
+              color: (_igLoggedIn || _xLoggedIn)
                   ? Theme.of(context).colorScheme.primary
                   : null,
             ),
-            tooltip: _isLoggedIn
-                ? 'Logged in to Instagram — tap to logout'
-                : 'Login to Instagram',
-            onPressed: () async {
-              if (_isLoggedIn) {
-                await SessionService.clearSession();
-                setState(() => _isLoggedIn = false);
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('Logged out of Instagram'),
-                      duration: Duration(seconds: 2),
-                    ),
-                  );
-                }
-              } else {
-                final result = await Navigator.of(context).push<bool>(
-                  MaterialPageRoute(builder: (_) => const LoginScreen()),
-                );
-                if (result == true) setState(() => _isLoggedIn = true);
-              }
-            },
+            tooltip: 'Accounts',
+            onPressed: () => _showAccountsSheet(context),
           ),
           // Wi-Fi only toggle
           IconButton(
@@ -293,5 +316,120 @@ class _EmptyHint extends StatelessWidget {
         ),
       ),
     ));
+  }
+}
+
+// ── Accounts bottom sheet ───────────────────────────────────────────────────
+
+class _AccountsSheet extends StatelessWidget {
+  const _AccountsSheet({
+    required this.igLoggedIn,
+    required this.xLoggedIn,
+    required this.onLogin,
+    required this.onLogout,
+  });
+
+  final bool igLoggedIn;
+  final bool xLoggedIn;
+  final void Function(LoginPlatform) onLogin;
+  final void Function(LoginPlatform) onLogout;
+
+  static const _platforms = [
+    (platform: LoginPlatform.instagram, label: 'Instagram', icon: Icons.camera_alt_outlined),
+    (platform: LoginPlatform.x, label: 'X (Twitter)', icon: Icons.close /* X logo closest built-in */),
+  ];
+
+  @override
+  Widget build(BuildContext context) {
+    final loggedIn = {
+      LoginPlatform.instagram: igLoggedIn,
+      LoginPlatform.x: xLoggedIn,
+    };
+    final cs = Theme.of(context).colorScheme;
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(24, 20, 24, 16),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Accounts', style: Theme.of(context).textTheme.titleMedium),
+            const SizedBox(height: 4),
+            Text(
+              'Log in to access private content',
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: cs.onSurfaceVariant),
+            ),
+            const SizedBox(height: 16),
+            for (final p in _platforms) ...[
+              _PlatformRow(
+                icon: p.icon,
+                label: p.label,
+                isLoggedIn: loggedIn[p.platform]!,
+                onLogin: () => onLogin(p.platform),
+                onLogout: () => onLogout(p.platform),
+              ),
+              if (p != _platforms.last) const Divider(height: 1),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PlatformRow extends StatelessWidget {
+  const _PlatformRow({
+    required this.icon,
+    required this.label,
+    required this.isLoggedIn,
+    required this.onLogin,
+    required this.onLogout,
+  });
+
+  final IconData icon;
+  final String label;
+  final bool isLoggedIn;
+  final VoidCallback onLogin;
+  final VoidCallback onLogout;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        children: [
+          Icon(icon, size: 28, color: cs.onSurface),
+          const SizedBox(width: 16),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label, style: Theme.of(context).textTheme.bodyLarge),
+                Text(
+                  isLoggedIn ? 'Logged in' : 'Not logged in',
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: isLoggedIn ? cs.primary : cs.onSurfaceVariant,
+                      ),
+                ),
+              ],
+            ),
+          ),
+          isLoggedIn
+              ? OutlinedButton(
+                  onPressed: onLogout,
+                  child: const Text('Logout'),
+                )
+              : FilledButton(
+                  onPressed: onLogin,
+                  child: const Text('Login'),
+                ),
+        ],
+      ),
+    );
   }
 }

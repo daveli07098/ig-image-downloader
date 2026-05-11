@@ -68,7 +68,7 @@ class DownloaderService {
     debugPrint('[IG] URL: $cleanUrl');
 
     // Attach session cookie if the user has logged in
-    final sessionId = await SessionService.getSessionId();
+    final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
     debugPrint('[IG] sessionId: ${sessionId != null ? 'SET (${sessionId.length} chars)' : 'NULL — not logged in'}');
     final cookieHeader =
         sessionId != null ? 'sessionid=$sessionId' : null;
@@ -433,7 +433,7 @@ class DownloaderService {
     final savePath = '${saveDir.path}/$filename';
     debugPrint('[IG] savePath: $savePath');
 
-    final sessionId = await SessionService.getSessionId();
+    final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
     await _dio.download(
       item.mediaUrl,
       savePath,
