@@ -4,8 +4,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/download_queue_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/share_intent_provider.dart';
-import '../services/ig_url_parser.dart';
-import '../services/x_downloader_service.dart';
 import '../services/session_service.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
@@ -46,11 +44,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _openSelection(String url) {
     final trimmed = url.trim();
-    if (!IgUrlParser.isInstagramUrl(trimmed) &&
-        !XDownloaderService.isXUrl(trimmed)) {
+    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-            content: Text('Please enter a valid Instagram or X (Twitter) URL')),
+        const SnackBar(content: Text('Please enter a valid URL')),
       );
       return;
     }
@@ -139,7 +135,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.3',
+                    'v1.0.0.4',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -261,7 +257,7 @@ class _UrlInputBar extends StatelessWidget {
               controller: controller,
               focusNode: focusNode,
               decoration: InputDecoration(
-                hintText: 'Paste Instagram or X URL…',
+                  hintText: 'Paste Instagram, X, or any article URL…',
                 prefixIcon: const Icon(Icons.link),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.clear),
