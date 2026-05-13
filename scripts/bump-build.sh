@@ -45,6 +45,6 @@ if [[ "${1:-}" == "--build" ]]; then
   fvm flutter build apk --release
   echo "Installing on device (keeping app data)…"
   DEVICE=$(${ADB} devices | awk 'NR==2{print $1}')
-  ${ADB} -s "$DEVICE" install -r build/app/outputs/flutter-apk/app-release.apk
+  ${ADB} -s "$DEVICE" install -r -d build/app/outputs/flutter-apk/app-release.apk
   echo "Installed ${NEW_DISPLAY_VERSION} on ${DEVICE}"
 fi
