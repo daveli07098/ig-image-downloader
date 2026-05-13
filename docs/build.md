@@ -1,5 +1,37 @@
 # Build Guide
 
+## Version numbering
+
+Format: `v{major}.{minor}.{patch}.{build}` — e.g. `v1.0.0.3`
+
+| File | Field | Example |
+|---|---|---|
+| `pubspec.yaml` | `version:` | `1.0.0+3` |
+| `lib/screens/home_screen.dart` | AppBar subtitle string | `'v1.0.0.3'` |
+
+The build number (the `+N` in pubspec and the last `.N` in the display string)
+increments by 1 for every release build. **Never edit these by hand** — use the
+bump script instead.
+
+### Bump before every build
+
+```bash
+# Bump version, commit, build APK, and install on device (keeps login data):
+./scripts/bump-build.sh --build
+
+# Or just bump + commit (build manually after):
+./scripts/bump-build.sh
+```
+
+The script:
+1. Reads `pubspec.yaml` for the current semver + build number
+2. Increments the build number
+3. Updates both `pubspec.yaml` and the AppBar string in `home_screen.dart`
+4. Makes a `chore: bump to vX.Y.Z.N` commit
+5. With `--build`: runs `fvm flutter build apk --release` then `adb install -r`
+
+---
+
 ## Prerequisites
 
 - **FVM 4.0.0** installed (`~/.nix-profile/bin/fvm`)
