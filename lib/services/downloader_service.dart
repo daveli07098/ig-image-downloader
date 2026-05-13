@@ -98,6 +98,31 @@ class DownloaderService {
       }
     }
 
+    // ── Strategy 0b: Story via private API ──────────────────────────────
+    // Story URLs already contain the numeric media ID, so no shortcode
+    // conversion is needed. Stories are always behind a session wall.
+    final storyMediaId = _extractStoryMediaId(cleanUrl);
+    if (storyMediaId != null) {
+      if (sessionId == null) {
+        throw Exception(
+          'Stories require login.\nPlease log in to download Instagram Stories.',
+        );
+      }
+      try {
+        final items = await _fetchViaMediaId(storyMediaId, sessionId);
+        if (items.isNotEmpty) {
+          debugPrint('[IG] Story API succeeded: ${items.length} items');
+          return items;
+        }
+      } catch (e) {
+        debugPrint('[IG] Story API failed: $e');
+        rethrow;
+      }
+      throw Exception(
+        'Could not download story. It may have expired (stories last 24 hours).',
+      );
+    }
+
     // ── Strategy A: embed captioned page ────────────────────────────────
     try {
       final embedUrl = '${cleanUrl}embed/captioned/';
@@ -142,6 +167,13 @@ class DownloaderService {
     return re.firstMatch(url)?.group(1);
   }
 
+  /// Extracts the numeric media ID from an Instagram Story URL.
+  /// e.g. https://www.instagram.com/stories/username/123456/ → '123456'
+  static String? _extractStoryMediaId(String url) {
+    final re = RegExp(r'instagram\.com/stories/[^/]+/(\d+)');
+    return re.firstMatch(url)?.group(1);
+  }
+
   /// Converts an Instagram URL shortcode to its numeric media ID.
   /// Instagram uses a URL-safe base64 alphabet over 64-value digits.
   /// Uses BigInt to safely handle IDs larger than 2^53.
@@ -160,6 +192,14 @@ class DownloaderService {
   Future<List<MediaItem>> _fetchViaPrivateApi(
       String shortcode, String sessionId) async {
     final mediaId = _shortcodeToId(shortcode);
+    return _fetchViaMediaId(mediaId, sessionId);
+  }
+
+  /// Calls the Instagram private API with a numeric media ID.
+  /// Used by both regular posts (after shortcode→ID conversion) and Stories
+  /// (whose URL already contains the numeric ID).
+  Future<List<MediaItem>> _fetchViaMediaId(
+      String mediaId, String sessionId) async {
     final url = 'https://i.instagram.com/api/v1/media/$mediaId/info/';
     debugPrint('[IG] Private API: $url');
 
