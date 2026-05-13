@@ -132,7 +132,19 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             Icon(Icons.download_rounded,
                 color: Theme.of(context).colorScheme.primary),
             const SizedBox(width: 8),
-            const Flexible(child: Text('IG Downloader', overflow: TextOverflow.ellipsis)),
+            const Flexible(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('IG Downloader', overflow: TextOverflow.ellipsis),
+                  Text(
+                    'v1.0.0',
+                    style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
+                  ),
+                ],
+              ),
+            ),
           ],
         ),
         actions: [
