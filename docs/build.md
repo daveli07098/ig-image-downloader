@@ -31,6 +31,20 @@ fvm flutter build apk --release
 # Output: build/app/outputs/flutter-apk/app-release.apk
 ```
 
+#### Installing without wiping app data
+
+`fvm flutter install` uninstalls the old APK first, which wipes app data
+(session cookies, preferences). To replace the APK while keeping all data
+intact — useful when you want to stay logged in across rebuilds — use
+`adb install -r` directly:
+
+```bash
+adb install -r build/app/outputs/flutter-apk/app-release.apk
+```
+
+> `-r` = replace existing app. The package name and signing cert must match
+> the installed version, which they always will during local development.
+
 ### Release AAB (Play Store)
 
 ```bash
