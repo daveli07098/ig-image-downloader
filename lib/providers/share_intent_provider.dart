@@ -32,7 +32,10 @@ class SharedUrlNotifier extends StateNotifier<String?> {
     final text = files.first.path; // receive_sharing_intent puts text in path
     if (text.contains('instagram.com') ||
         text.contains('x.com/') ||
-        text.contains('twitter.com/')) {
+        text.contains('twitter.com/') ||
+        text.contains('funnynews-media.com') ||
+        text.contains('funnymedianews.com') ||
+        text.contains('funestnews.com')) {
       state = text;
     }
   }

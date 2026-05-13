@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
+import 'funnynews_downloader_service.dart';
 import 'session_service.dart';
 import 'storage_service.dart';
 import 'x_downloader_service.dart';
@@ -66,6 +67,9 @@ class DownloaderService {
   Future<List<MediaItem>> fetchItems(String url) async {
     if (XDownloaderService.isXUrl(url)) {
       return XDownloaderService().fetchItems(url);
+    }
+    if (FunnynewsDownloaderService.isFunnynewsUrl(url)) {
+      return FunnynewsDownloaderService().fetchItems(url);
     }
     return _fetchIgItems(url);
   }
