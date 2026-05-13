@@ -33,9 +33,8 @@ class SharedUrlNotifier extends StateNotifier<String?> {
     if (text.contains('instagram.com') ||
         text.contains('x.com/') ||
         text.contains('twitter.com/') ||
-        text.contains('funnynews-media.com') ||
-        text.contains('funnymedianews.com') ||
-        text.contains('funestnews.com')) {
+        text.startsWith('http://') ||
+        text.startsWith('https://')) {
       state = text;
     }
   }

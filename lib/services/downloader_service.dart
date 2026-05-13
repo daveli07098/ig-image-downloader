@@ -4,7 +4,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
-import 'funnynews_downloader_service.dart';
+import 'generic_article_downloader_service.dart';
+import 'ig_url_parser.dart';
 import 'session_service.dart';
 import 'storage_service.dart';
 import 'x_downloader_service.dart';
@@ -68,8 +69,9 @@ class DownloaderService {
     if (XDownloaderService.isXUrl(url)) {
       return XDownloaderService().fetchItems(url);
     }
-    if (FunnynewsDownloaderService.isFunnynewsUrl(url)) {
-      return FunnynewsDownloaderService().fetchItems(url);
+    if (!IgUrlParser.isInstagramUrl(url)) {
+      // Not IG or X — try generic article extraction (structural detection)
+      return GenericArticleDownloaderService().fetchItems(url);
     }
     return _fetchIgItems(url);
   }
