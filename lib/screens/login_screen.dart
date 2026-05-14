@@ -11,6 +11,9 @@ class _PlatformConfig {
   final String cookieName;
   /// URL patterns that indicate the user is still on the login flow (not done yet).
   final List<String> loginFlowPatterns;
+  /// If true, stores the entire raw cookie string rather than just the named cookie.
+  /// Use for platforms like Facebook where several cookies are needed together.
+  final bool storeFullCookies;
 
   const _PlatformConfig({
     required this.label,
@@ -18,6 +21,7 @@ class _PlatformConfig {
     required this.cookieDomain,
     required this.cookieName,
     required this.loginFlowPatterns,
+    this.storeFullCookies = false,
   });
 }
 
@@ -35,6 +39,22 @@ const _configs = {
     cookieDomain: 'https://x.com',
     cookieName: 'auth_token',
     loginFlowPatterns: ['/i/flow/login', '/i/flow/signup', 'twitter.com/login', 'x.com/login'],
+  ),
+  LoginPlatform.facebook: _PlatformConfig(
+    label: 'Facebook',
+    loginUrl: 'https://www.facebook.com/login/',
+    cookieDomain: 'https://www.facebook.com',
+    // Detect login completion by the presence of the c_user cookie (user ID).
+    // The full cookie string (c_user + xs + datr etc.) is stored so requests
+    // can be made with the complete auth header.
+    cookieName: 'c_user',
+    loginFlowPatterns: [
+      'facebook.com/login',
+      'facebook.com/checkpoint',
+      '/login/',
+      '/login?',
+    ],
+    storeFullCookies: true,
   ),
 };
 
@@ -83,9 +103,31 @@ class _LoginScreenState extends State<LoginScreen> {
     // Read cookies via native Android CookieManager MethodChannel.
     // This is the only reliable way to get HttpOnly cookies like sessionid /
     // auth_token — JS document.cookie and WebViewCookieManager both fail.
-    final token = await _readCookieFromNative(_cfg.cookieDomain, _cfg.cookieName);
-    debugPrint('[Login/${_cfg.label}] ${_cfg.cookieName} after redirect to $url: '
-        '${token != null ? 'FOUND' : 'NOT FOUND'}');
+    final rawCookies = await _readRawCookiesFromNative(_cfg.cookieDomain);
+    debugPrint('[Login/${_cfg.label}] cookies after redirect to $url: '
+        '${rawCookies != null ? 'FOUND' : 'NOT FOUND'}');
+
+    if (rawCookies == null || rawCookies.isEmpty) return;
+
+    // For platforms that need the full cookie string (e.g. Facebook), store
+    // it whole.  For others, extract just the named cookie value.
+    String? token;
+    if (_cfg.storeFullCookies) {
+      // Only proceed if the sentinel cookie (e.g. c_user) is present —
+      // that confirms the user has actually completed login.
+      final hasSentinel = rawCookies
+          .split(';')
+          .any((part) => part.trim().startsWith('${_cfg.cookieName}='));
+      if (hasSentinel) token = rawCookies;
+    } else {
+      for (final part in rawCookies.split(';')) {
+        final kv = part.trim().split('=');
+        if (kv.length >= 2 && kv[0].trim() == _cfg.cookieName) {
+          token = kv.sublist(1).join('=').trim();
+          break;
+        }
+      }
+    }
 
     if (token != null && token.isNotEmpty) {
       _captured = true;
@@ -99,23 +141,17 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  Future<String?> _readCookieFromNative(String domain, String cookieName) async {
+  Future<String?> _readRawCookiesFromNative(String domain) async {
     try {
       final raw = await _cookieChannel.invokeMethod<String>(
         'getCookie',
         {'url': domain},
       );
-      if (raw == null || raw.isEmpty) return null;
-      for (final part in raw.split(';')) {
-        final kv = part.trim().split('=');
-        if (kv.length >= 2 && kv[0].trim() == cookieName) {
-          return kv.sublist(1).join('=').trim();
-        }
-      }
+      return (raw != null && raw.isNotEmpty) ? raw : null;
     } catch (e) {
       debugPrint('[Login/${_cfg.label}] Cookie channel error: $e');
+      return null;
     }
-    return null;
   }
 
   Future<void> _logout() async {

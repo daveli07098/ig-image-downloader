@@ -73,10 +73,15 @@ class DownloaderService {
       return XDownloaderService().fetchItems(url);
     }
     if (ThreadsDownloaderService.isThreadsUrl(url)) {
-      return ThreadsDownloaderService().fetchItems(url);
+      // Threads shares Instagram's auth backend — reuse the IG session cookie
+      final igSessionId =
+          await SessionService.getSessionId(LoginPlatform.instagram);
+      return ThreadsDownloaderService().fetchItems(url, igSessionId: igSessionId);
     }
     if (FacebookDownloaderService.isFacebookUrl(url)) {
-      return FacebookDownloaderService().fetchItems(url);
+      final fbCookies =
+          await SessionService.getSessionId(LoginPlatform.facebook);
+      return FacebookDownloaderService().fetchItems(url, fbCookies: fbCookies);
     }
     if (!IgUrlParser.isInstagramUrl(url)) {
       // Not IG, X, Threads, or Facebook — try generic article extraction

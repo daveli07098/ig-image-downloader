@@ -60,9 +60,17 @@ class FacebookDownloaderService {
 
   // ── Fetch media items ────────────────────────────────────────────────────
 
-  Future<List<MediaItem>> fetchItems(String url) async {
+  /// [fbCookies] — the full Facebook cookie string captured from the WebView
+  /// login (contains c_user, xs, datr, etc.). When provided, authenticated
+  /// pages are fetched which unlocks video URLs and private content.
+  Future<List<MediaItem>> fetchItems(String url, {String? fbCookies}) async {
     final cleanUrl = url.split('?').first;
-    debugPrint('[FB] URL: $cleanUrl');
+    debugPrint('[FB] URL: $cleanUrl  session: ${fbCookies != null ? 'YES' : 'NO'}');
+
+    // Inject Facebook session cookies when available
+    if (fbCookies != null) {
+      _dio.options.headers['Cookie'] = fbCookies;
+    }
 
     final resp = await _dio.get<String>(cleanUrl);
 

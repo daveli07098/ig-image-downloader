@@ -64,10 +64,22 @@ class ThreadsDownloaderService {
 
   // ── Fetch ────────────────────────────────────────────────────────────────
 
-  Future<List<MediaItem>> fetchItems(String url) async {
+  /// [igSessionId] — the Instagram `sessionid` cookie value.
+  /// Threads shares Instagram's auth backend, so the same session token works
+  /// on threads.com, enabling access to private posts and full post data.
+  Future<List<MediaItem>> fetchItems(String url,
+      {String? igSessionId}) async {
     final cleanUrl = url.split('?').first;
-    debugPrint('[Threads] URL: $cleanUrl');
+    debugPrint('[Threads] URL: $cleanUrl  session: ${igSessionId != null ? 'YES' : 'NO'}');
     final username = extractUsername(cleanUrl) ?? 'threads';
+
+    // Inject the Instagram session cookie into both Dio instances when available.
+    // threads.com accepts the same sessionid as instagram.com.
+    if (igSessionId != null) {
+      final cookieHeader = 'sessionid=$igSessionId';
+      _desktopDio.options.headers['Cookie'] = cookieHeader;
+      _botDio.options.headers['Cookie'] = cookieHeader;
+    }
 
     // ── Strategy A: Desktop Chrome UA ────────────────────────────────────
     String? desktopHtml;

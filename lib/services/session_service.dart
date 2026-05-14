@@ -1,7 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Supported login platforms.
-enum LoginPlatform { instagram, x }
+enum LoginPlatform { instagram, x, facebook }
 
 /// Persists session cookies for multiple platforms so they survive app restarts.
 /// The relevant cookie is injected into Dio requests via [DownloaderService].
@@ -11,6 +11,9 @@ class SessionService {
   static const _keys = {
     LoginPlatform.instagram: 'ig_sessionid',
     LoginPlatform.x: 'x_auth_token',
+    // Facebook stores the entire cookie string (c_user + xs + datr etc.)
+    // rather than a single named value because all three are needed together.
+    LoginPlatform.facebook: 'fb_cookies',
   };
 
   static Future<String?> getSessionId(LoginPlatform platform) async {

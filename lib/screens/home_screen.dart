@@ -22,6 +22,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _focusNode = FocusNode();
   bool _igLoggedIn = false;
   bool _xLoggedIn = false;
+  bool _fbLoggedIn = false;
 
   @override
   void initState() {
@@ -32,7 +33,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Future<void> _refreshLoginState() async {
     final ig = await SessionService.isLoggedIn(LoginPlatform.instagram);
     final x = await SessionService.isLoggedIn(LoginPlatform.x);
-    if (mounted) setState(() { _igLoggedIn = ig; _xLoggedIn = x; });
+    final fb = await SessionService.isLoggedIn(LoginPlatform.facebook);
+    if (mounted) setState(() { _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb; });
   }
 
   @override
@@ -77,6 +79,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       builder: (_) => _AccountsSheet(
         igLoggedIn: _igLoggedIn,
         xLoggedIn: _xLoggedIn,
+        fbLoggedIn: _fbLoggedIn,
         onLogin: (platform) async {
           final nav = Navigator.of(context);
           nav.pop();
@@ -92,7 +95,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           await SessionService.clearSession(platform);
           _refreshLoginState();
           if (!mounted) return;
-          const labels = {LoginPlatform.instagram: 'Instagram', LoginPlatform.x: 'X'};
+          const labels = {LoginPlatform.instagram: 'Instagram', LoginPlatform.x: 'X', LoginPlatform.facebook: 'Facebook'};
           messenger.showSnackBar(
             SnackBar(
               content: Text('Logged out of ${labels[platform]}'),
@@ -135,7 +138,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.11',
+                    'v1.0.0.12',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -147,10 +150,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           // Multi-platform accounts button
           IconButton(
             icon: Icon(
-              (_igLoggedIn || _xLoggedIn)
+              (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
                   ? Icons.account_circle
                   : Icons.account_circle_outlined,
-              color: (_igLoggedIn || _xLoggedIn)
+              color: (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
                   ? Theme.of(context).colorScheme.primary
                   : null,
             ),
@@ -336,18 +339,21 @@ class _AccountsSheet extends StatelessWidget {
   const _AccountsSheet({
     required this.igLoggedIn,
     required this.xLoggedIn,
+    required this.fbLoggedIn,
     required this.onLogin,
     required this.onLogout,
   });
 
   final bool igLoggedIn;
   final bool xLoggedIn;
+  final bool fbLoggedIn;
   final void Function(LoginPlatform) onLogin;
   final void Function(LoginPlatform) onLogout;
 
   static const _platforms = [
     (platform: LoginPlatform.instagram, label: 'Instagram', icon: Icons.camera_alt_outlined),
     (platform: LoginPlatform.x, label: 'X (Twitter)', icon: Icons.close /* X logo closest built-in */),
+    (platform: LoginPlatform.facebook, label: 'Facebook', icon: Icons.facebook_rounded),
   ];
 
   @override
@@ -355,6 +361,7 @@ class _AccountsSheet extends StatelessWidget {
     final loggedIn = {
       LoginPlatform.instagram: igLoggedIn,
       LoginPlatform.x: xLoggedIn,
+      LoginPlatform.facebook: fbLoggedIn,
     };
     final cs = Theme.of(context).colorScheme;
 
