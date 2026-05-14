@@ -53,9 +53,11 @@ Never invoke without explicit user request:
 # Bump version and stage it alongside code changes — one commit
 ./scripts/bump-build.sh --no-commit
 git add <changed files> pubspec.yaml lib/screens/home_screen.dart
-git commit -m "type(scope): description"
+git commit -m "type(scope): description (vX.Y.Z.N)"
 git rev-parse --short HEAD
 ```
+
+> The version number is printed by `--no-commit` — include it at the end of the commit subject.
 
 **Do NOT:**
 - Skip a commit because "more work is coming" — commit each logical unit as it finishes

@@ -39,8 +39,10 @@ After any non-trivial session, run the session-wrap workflow:
    ```bash
    ./scripts/bump-build.sh --no-commit
    git add <changed files> pubspec.yaml lib/screens/home_screen.dart
-   git commit -m "type(scope): description"
+   git commit -m "type(scope): description (vX.Y.Z.N)"
    ```
+
+   > The version number is printed by `--no-commit` — include it at the end of the commit subject.
 3. Write `docs/<topic>.md` for reusable findings or procedures.
 4. Append to `CHANGELOG.md` using dated session blocks:
 
