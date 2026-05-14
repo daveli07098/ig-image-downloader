@@ -1,13 +1,16 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
+import 'facebook_downloader_service.dart';
 import 'generic_article_downloader_service.dart';
 import 'ig_url_parser.dart';
 import 'session_service.dart';
 import 'storage_service.dart';
+import 'threads_downloader_service.dart';
 import 'x_downloader_service.dart';
 
 /// Fetches an Instagram page, extracts all media items (carousel-aware),
@@ -69,8 +72,14 @@ class DownloaderService {
     if (XDownloaderService.isXUrl(url)) {
       return XDownloaderService().fetchItems(url);
     }
+    if (ThreadsDownloaderService.isThreadsUrl(url)) {
+      return ThreadsDownloaderService().fetchItems(url);
+    }
+    if (FacebookDownloaderService.isFacebookUrl(url)) {
+      return FacebookDownloaderService().fetchItems(url);
+    }
     if (!IgUrlParser.isInstagramUrl(url)) {
-      // Not IG or X — try generic article extraction (structural detection)
+      // Not IG, X, Threads, or Facebook — try generic article extraction
       return GenericArticleDownloaderService().fetchItems(url);
     }
     return _fetchIgItems(url);
@@ -486,6 +495,13 @@ class DownloaderService {
     final filename = '${item.filenameBase}.$ext';
     final savePath = '${saveDir.path}/$filename';
     debugPrint('[IG] savePath: $savePath');
+
+    // File already exists — skip re-download (e.g. after permission-denied on first attempt
+    // that was actually a "file exists" OS error on Android public storage).
+    if (File(savePath).existsSync()) {
+      debugPrint('[IG] Already exists, skipping download: $savePath');
+      return savePath;
+    }
 
     final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
     // Only send Instagram cookies for Instagram CDN URLs

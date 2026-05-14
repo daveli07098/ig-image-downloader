@@ -140,6 +140,8 @@ class _TypeBadge extends StatelessWidget {
           : (Icons.image_rounded, Colors.teal),
       IgMediaType.unknown => (Icons.help_outline_rounded, Colors.grey),
       IgMediaType.xPost => (Icons.close, Colors.black87),
+      IgMediaType.threadsPost => (Icons.alternate_email_rounded, Colors.black54),
+      IgMediaType.facebookPost => (Icons.facebook_rounded, Colors.blue),
     };
 
     return Container(

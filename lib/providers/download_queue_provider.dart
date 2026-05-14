@@ -8,7 +8,9 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/download_job.dart';
 import '../services/downloader_service.dart';
+import '../services/facebook_downloader_service.dart';
 import '../services/ig_url_parser.dart';
+import '../services/threads_downloader_service.dart';
 import '../services/x_downloader_service.dart';
 import 'settings_provider.dart';
 
@@ -82,7 +84,11 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
     final type = XDownloaderService.isXUrl(postUrl)
         ? IgMediaType.xPost
-        : IgUrlParser.detect(postUrl);
+        : ThreadsDownloaderService.isThreadsUrl(postUrl)
+            ? IgMediaType.threadsPost
+            : FacebookDownloaderService.isFacebookUrl(postUrl)
+                ? IgMediaType.facebookPost
+                : IgUrlParser.detect(postUrl);
     final jobs = selectedItems.map((item) => DownloadJob(
           id: _uuid.v4(),
           url: postUrl,
