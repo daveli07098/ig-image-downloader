@@ -70,31 +70,27 @@ class FacebookDownloaderService {
       throw Exception('Failed to load Facebook page (${resp.statusCode})');
     }
 
-    // Use the final URL after redirects for username extraction
+    final html = resp.data!;
     final finalUrl = resp.realUri.toString();
     final username = _usernameFromUrl(finalUrl);
     debugPrint('[FB] final URL: $finalUrl  username: $username');
 
-    return _parsePage(resp.data!, username);
-  }
-
-  List<MediaItem> _parsePage(String html, String username) {
+    // ── Parse OG tags ─────────────────────────────────────────────────────
     final document = html_parser.parse(html);
-    final ogVideos = <String>[];
+    String? ogVideoUrl;
     final ogImages = <String>[];
-    bool hasEmbedVideoOnly = false;
 
     for (final tag in document.querySelectorAll('meta[property]')) {
       final property = tag.attributes['property'] ?? '';
       final content = tag.attributes['content'] ?? '';
       if (content.isEmpty) continue;
 
-      if (property == 'og:video' ||
-          property == 'og:video:url' ||
-          property == 'og:video:secure_url') {
-        if (!ogVideos.contains(content)) ogVideos.add(content);
+      if ((property == 'og:video' ||
+              property == 'og:video:url' ||
+              property == 'og:video:secure_url') &&
+          ogVideoUrl == null) {
+        ogVideoUrl = content;
       } else if (property == 'og:image' || property == 'og:image:url') {
-        // Exclude generic Facebook share / logo images
         if (!content.contains('static.xx.fbcdn') &&
             !content.contains('/rsrc.php/') &&
             !ogImages.contains(content)) {
@@ -103,34 +99,56 @@ class FacebookDownloaderService {
       }
     }
 
-    // ── Real video URL extraction ─────────────────────────────────────────
-    // og:video from Facebook is often an embed iframe URL (text/html), not
-    // an actual MP4. Parse the page's embedded JSON for the real CDN URL.
-    String? realVideoUrl;
-    if (ogVideos.isNotEmpty) {
-      final isEmbedUrl = ogVideos.first.contains('video/embed') ||
-          ogVideos.first.contains('video.php') ||
-          !ogVideos.first.contains('fbcdn.net');
-      if (isEmbedUrl) {
-        realVideoUrl = _extractVideoUrlFromJson(html);
-        hasEmbedVideoOnly = realVideoUrl == null;
-      } else {
-        realVideoUrl = ogVideos.first;
-      }
-    } else {
-      // No og:video at all — still try JSON extraction (Reels often omit it)
-      realVideoUrl = _extractVideoUrlFromJson(html);
-    }
-
-    // ── Carousel image extraction ─────────────────────────────────────────
-    // og:image only exposes the first photo. Pull extra CDN images from
-    // the page's embedded JSON for multi-photo posts.
+    // ── Carousel image extraction from page JSON ───────────────────────────
     final allImages = List<String>.from(ogImages);
     _extractCarouselImagesFromJson(html, allImages);
 
-    debugPrint('[FB] video: ${realVideoUrl != null ? "found" : "none"}, '
-        'images: ${allImages.length} for @$username');
+    // ── Real video URL extraction ──────────────────────────────────────────
+    // og:video from Facebook is typically an embed iframe URL, not an MP4.
+    // Strategy:
+    //   1. If og:video is already a real CDN video URL, use it directly.
+    //   2. Try to extract from JSON in the main page source.
+    //   3. Fetch the embed URL itself and look for <video> or JSON video data.
+    String? realVideoUrl;
 
+    if (ogVideoUrl != null) {
+      final isRealCdn = ogVideoUrl.contains('fbcdn.net') &&
+          !ogVideoUrl.contains('embed') &&
+          !ogVideoUrl.contains('video.php');
+      if (isRealCdn) {
+        realVideoUrl = ogVideoUrl;
+      }
+    }
+
+    // Try JSON patterns in main page source
+    realVideoUrl ??= _extractVideoUrlFromJson(html);
+
+    // Fetch the embed page and look for the video there
+    if (realVideoUrl == null && ogVideoUrl != null) {
+      final isEmbedUrl = ogVideoUrl.contains('embed') ||
+          ogVideoUrl.contains('video.php') ||
+          !ogVideoUrl.contains('fbcdn.net');
+      if (isEmbedUrl) {
+        try {
+          debugPrint('[FB] Fetching embed URL: $ogVideoUrl');
+          final embedResp = await _dio.get<String>(ogVideoUrl);
+          if (embedResp.statusCode == 200 && embedResp.data != null) {
+            final embedHtml = embedResp.data!;
+            realVideoUrl = _extractVideoUrlFromJson(embedHtml) ??
+                _extractVideoTagSrc(embedHtml);
+            debugPrint(
+                '[FB] Embed page video: ${realVideoUrl != null ? "found" : "not found"}');
+          }
+        } catch (e) {
+          debugPrint('[FB] Embed fetch failed: $e');
+        }
+      }
+    }
+
+    debugPrint(
+        '[FB] video: ${realVideoUrl != null}, images: ${allImages.length}, user: $username');
+
+    // ── Build items ───────────────────────────────────────────────────────
     final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
     final items = <MediaItem>[];
 
@@ -144,24 +162,18 @@ class FacebookDownloaderService {
         itemIndex: 1,
         postTimestamp: now,
       ));
-    } else if (hasEmbedVideoOnly) {
-      throw Exception(
-        'Could not extract video URL.\n'
-        'Facebook Reels may require login or a different share link.',
-      );
     }
 
-    final imageStart = realVideoUrl != null ? 0 : 0;
-    for (var i = imageStart; i < allImages.length; i++) {
-      // Skip if it's already used as the video thumbnail (index 0 when video present)
+    for (var i = 0; i < allImages.length; i++) {
+      // Skip index 0 when a video is present — it's used as the thumbnail
       if (realVideoUrl != null && i == 0) continue;
       items.add(MediaItem(
-        id: '$i',
+        id: '${items.length}',
         mediaUrl: allImages[i],
         thumbnailUrl: allImages[i],
         type: MediaItemType.image,
         username: username,
-        itemIndex: realVideoUrl != null ? i + 1 : i + 1,
+        itemIndex: items.length + 1,
         postTimestamp: now,
       ));
     }
@@ -227,6 +239,15 @@ class FacebookDownloaderService {
         existing.add(url);
       }
     }
+  }
+
+  /// Extracts a video URL from a `<video src="...">` tag in embed page HTML.
+  String? _extractVideoTagSrc(String html) {
+    final re = RegExp(r'<video[^>]+src="([^"]+\.mp4[^"]*)"', caseSensitive: false);
+    final m = re.firstMatch(html);
+    if (m == null) return null;
+    final url = _unescape(m.group(1)!);
+    return url.startsWith('https://') ? url : null;
   }
 
   String _unescape(String s) =>
