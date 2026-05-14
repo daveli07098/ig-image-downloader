@@ -231,3 +231,4 @@ class FacebookDownloaderService {
 
   String _unescape(String s) =>
       s.replaceAll(r'\/', '/').replaceAll(r'\u0026', '&');
+}
