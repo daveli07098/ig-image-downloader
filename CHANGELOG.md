@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-05-29] — Session: Facebook login + IG session reuse for Threads
+
+### Added
+- feat(auth): `LoginPlatform.facebook` enum + `fb_cookies` key in `SessionService` ([566ebbe])
+- feat(auth): Facebook WebView login screen config (`storeFullCookies=true`, `c_user` sentinel) ([566ebbe])
+- feat(auth): Facebook login/logout button in accounts sheet on `HomeScreen` ([566ebbe])
+- feat(auth): `ThreadsDownloaderService.fetchItems` now accepts `igSessionId` — injects `sessionid` cookie into both Dio clients ([566ebbe])
+- feat(auth): `FacebookDownloaderService.fetchItems` now accepts `fbCookies` — injects full cookie string into Dio client ([566ebbe])
+- feat(auth): `DownloaderService` reads stored IG session for Threads, FB cookies for Facebook, and passes them to the respective service ([566ebbe])
+
 ## [2026-04-26] — Session: Initial Flutter mobile draft
 
 ### Added
