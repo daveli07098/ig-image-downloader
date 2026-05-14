@@ -2,23 +2,20 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
-import 'session_service.dart';
 
 /// Downloads media from Threads (threads.com / threads.net) posts.
 ///
-/// Threads is owned by Meta and shares infrastructure with Instagram, so the
-/// Instagram session cookie is reused for authenticated requests. Public posts
-/// are accessible without login via OG tag scraping.
+/// Uses the facebookexternalhit UA so Meta's servers render OG tags
+/// server-side (same as Facebook). Public posts work without any cookies.
 ///
 /// URL formats supported:
 ///   https://www.threads.com/@username/post/POSTID
 ///   https://www.threads.net/@username/post/POSTID
 class ThreadsDownloaderService {
-  // Mobile Safari UA — Threads serves OG tags reliably to mobile browsers.
+  // Meta's own crawler UA — causes Threads/Facebook to serve OG-tag-rich HTML.
+  // Mobile browser UAs often get a "download the app" response (404) instead.
   static const _ua =
-      'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
-      'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 '
-      'Safari/604.1';
+      'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
   final Dio _dio;
 
@@ -31,7 +28,9 @@ class ThreadsDownloaderService {
               maxRedirects: 5,
               headers: {
                 'User-Agent': _ua,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                 'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.threads.com/',
               },
             ));
 
@@ -57,16 +56,7 @@ class ThreadsDownloaderService {
 
     final username = extractUsername(cleanUrl) ?? 'threads';
 
-    // Reuse Instagram session cookie — Threads shares Meta's auth infra
-    final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
-    final cookieHeader = sessionId != null ? 'sessionid=$sessionId' : null;
-
-    final resp = await _dio.get<String>(
-      cleanUrl,
-      options: cookieHeader != null
-          ? Options(headers: {'Cookie': cookieHeader})
-          : null,
-    );
+    final resp = await _dio.get<String>(cleanUrl);
 
     if (resp.statusCode != 200 || resp.data == null) {
       throw Exception('Failed to load Threads page (${resp.statusCode})');
