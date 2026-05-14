@@ -90,7 +90,9 @@ class FacebookDownloaderService {
               property == 'og:video:secure_url') &&
           ogVideoUrl == null) {
         ogVideoUrl = content;
-      } else if (property == 'og:image' || property == 'og:image:url') {
+      } else if (property == 'og:image' ||
+          property == 'og:image:url' ||
+          property == 'og:image:secure_url') {
         if (!content.contains('static.xx.fbcdn') &&
             !content.contains('/rsrc.php/') &&
             !ogImages.contains(content)) {
@@ -223,20 +225,35 @@ class FacebookDownloaderService {
   }
 
   /// Extracts additional carousel/album image URLs from Facebook's embedded JSON.
-  /// Only adds CDN images not already in [existing].
+  /// Searches multiple field names (`uri`, `src`, `url`) and both CDN domains.
+  /// Only adds images not already in [existing].
   void _extractCarouselImagesFromJson(String html, List<String> existing) {
     final seen = existing.toSet();
-    // Facebook stores image URIs in its JSON payload — look for scontent CDN URLs
-    final pattern = RegExp(
-      r'"uri"\s*:\s*"(https://[^"]*scontent[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
-    );
-    for (final m in pattern.allMatches(html)) {
-      final url = _unescape(m.group(1)!);
-      // Exclude profile photos and generic UI assets
-      if (!url.contains('/profile') &&
-          !url.contains('/rsrc') &&
-          seen.add(url)) {
-        existing.add(url);
+
+    // Facebook uses various field names for image URIs in its JS payloads.
+    // Both scontent (user photos) and fbcdn (general CDN) are valid image hosts.
+    final patterns = [
+      RegExp(
+        r'"uri"\s*:\s*"(https://[^"\\]+(?:scontent|fbcdn)[^"\\]+\.(?:jpg|jpeg|png|webp)[^"\\]*)"',
+      ),
+      RegExp(
+        r'"src"\s*:\s*"(https://[^"\\]+(?:scontent|fbcdn)[^"\\]+\.(?:jpg|jpeg|png|webp)[^"\\]*)"',
+      ),
+      RegExp(
+        r'"url"\s*:\s*"(https://[^"\\]+(?:scontent|fbcdn)[^"\\]+\.(?:jpg|jpeg|png|webp)[^"\\]*)"',
+      ),
+    ];
+
+    for (final pattern in patterns) {
+      for (final m in pattern.allMatches(html)) {
+        final url = _unescape(m.group(1)!);
+        if (!url.contains('/profile') &&
+            !url.contains('/rsrc') &&
+            !url.contains('/emoji') &&
+            !url.contains('static.xx.fbcdn') &&
+            seen.add(url)) {
+          existing.add(url);
+        }
       }
     }
   }

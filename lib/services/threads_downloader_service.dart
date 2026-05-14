@@ -94,13 +94,54 @@ class ThreadsDownloaderService {
       debugPrint('[Threads] Desktop UA failed: $e');
     }
 
-    // ── Strategy B: facebookexternalhit → OG tags ────────────────────────
+    // ── Strategy B: facebookexternalhit → OG tags + embed URL fetch ───────
+    // Threads sets og:video to an embed iframe URL (not a direct MP4).
+    // We collect embed URLs separately and fetch them for the real video.
     try {
       final resp = await _botDio.get<String>(cleanUrl);
       if (resp.statusCode == 200 && resp.data != null) {
-        final items = _parseOgTags(resp.data!, username);
+        final (:realVideos, :embedVideos, :images) =
+            _parseOgData(resp.data!);
+        debugPrint(
+            '[Threads] OG: ${realVideos.length} real, '
+            '${embedVideos.length} embed videos, ${images.length} images');
+
+        // Prefer a real (non-embed) video URL; fall back to fetching the embed
+        String? videoUrl =
+            realVideos.isNotEmpty ? realVideos.first : null;
+        if (videoUrl == null && embedVideos.isNotEmpty) {
+          videoUrl = await _fetchVideoFromEmbedUrl(embedVideos.first);
+        }
+
+        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+        final items = <MediaItem>[];
+
+        if (videoUrl != null) {
+          items.add(MediaItem(
+            id: '0',
+            mediaUrl: videoUrl,
+            thumbnailUrl: images.isNotEmpty ? images.first : null,
+            type: MediaItemType.video,
+            username: username,
+            itemIndex: 1,
+            postTimestamp: now,
+          ));
+        } else {
+          for (var i = 0; i < images.length; i++) {
+            items.add(MediaItem(
+              id: '$i',
+              mediaUrl: images[i],
+              thumbnailUrl: images[i],
+              type: MediaItemType.image,
+              username: username,
+              itemIndex: i + 1,
+              postTimestamp: now,
+            ));
+          }
+        }
+
         if (items.isNotEmpty) {
-          debugPrint('[Threads] OG tags: ${items.length} items');
+          debugPrint('[Threads] OG+embed: ${items.length} items');
           return items;
         }
       }
@@ -289,11 +330,17 @@ class ThreadsDownloaderService {
     return items;
   }
 
-  // ── B: OG tag fallback ────────────────────────────────────────────────────
+  // ── B: OG tag parsing + embed URL video extraction ────────────────────────
 
-  List<MediaItem> _parseOgTags(String html, String username) {
+  /// Parses OG meta tags, separating real video URLs from embed page URLs.
+  ({
+    List<String> realVideos,
+    List<String> embedVideos,
+    List<String> images,
+  }) _parseOgData(String html) {
     final document = html_parser.parse(html);
-    final videos = <String>[];
+    final realVideos = <String>[];
+    final embedVideos = <String>[];
     final images = <String>[];
 
     for (final tag in document.querySelectorAll('meta[property]')) {
@@ -301,11 +348,11 @@ class ThreadsDownloaderService {
       final content = tag.attributes['content'] ?? '';
       if (content.isEmpty) continue;
       if (property == 'og:video' || property == 'og:video:url') {
-        // Exclude embed page URLs — they are HTML, not downloadable video files
-        if (!content.contains('embed') &&
-            !content.contains('video.php') &&
-            !videos.contains(content)) {
-          videos.add(content);
+        // Embed iframe URLs are HTML pages — collect separately for fetching
+        if (content.contains('embed') || content.contains('video.php')) {
+          if (!embedVideos.contains(content)) embedVideos.add(content);
+        } else if (!realVideos.contains(content)) {
+          realVideos.add(content);
         }
       } else if (property == 'og:image') {
         if (!content.contains('profilepic') && !images.contains(content)) {
@@ -313,36 +360,57 @@ class ThreadsDownloaderService {
         }
       }
     }
+    return (realVideos: realVideos, embedVideos: embedVideos, images: images);
+  }
 
-    final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-    final items = <MediaItem>[];
+  /// Fetches a Threads embed page and extracts the real video CDN URL from it.
+  /// The embed page is a public iframe-friendly page that contains the video player.
+  Future<String?> _fetchVideoFromEmbedUrl(String embedUrl) async {
+    for (final dio in [_botDio, _desktopDio]) {
+      try {
+        debugPrint('[Threads] Fetching embed: $embedUrl');
+        final resp = await dio.get<String>(embedUrl);
+        if (resp.statusCode != 200 || resp.data == null) continue;
+        final html = resp.data!;
 
-    if (videos.isNotEmpty) {
-      for (var i = 0; i < videos.length; i++) {
-        items.add(MediaItem(
-          id: '$i',
-          mediaUrl: videos[i],
-          thumbnailUrl: i < images.length ? images[i] : null,
-          type: MediaItemType.video,
-          username: username,
-          itemIndex: i + 1,
-          postTimestamp: now,
-        ));
-      }
-    } else {
-      for (var i = 0; i < images.length; i++) {
-        items.add(MediaItem(
-          id: '$i',
-          mediaUrl: images[i],
-          thumbnailUrl: images[i],
-          type: MediaItemType.image,
-          username: username,
-          itemIndex: i + 1,
-          postTimestamp: now,
-        ));
+        // <video src="..."> — most common in embed players
+        final videoTagRe =
+            RegExp(r'<video[^>]+src="([^"]+)"', caseSensitive: false);
+        final vMatch = videoTagRe.firstMatch(html);
+        if (vMatch != null) {
+          final url = _unescape(vMatch.group(1)!);
+          if (url.startsWith('https://') && !url.contains('embed')) {
+            debugPrint('[Threads] Embed: found via <video> tag');
+            return url;
+          }
+        }
+
+        // JavaScript / JSON patterns (Instagram/Threads SSR or inline data)
+        final patterns = [
+          RegExp(r'"playable_url"\s*:\s*"([^"]+)"'),
+          RegExp(r'"video_url"\s*:\s*"([^"]+)"'),
+          RegExp(r'"url"\s*:\s*"(https://[^"]+t50\.2886-16[^"]+\.mp4[^"]*)"'),
+          RegExp(r'"src"\s*:\s*"(https://[^"]+\.mp4[^"]*)"'),
+          // bare MP4 URL anywhere in the page (last resort)
+          RegExp(r'(https://[^\s"\x27]+\.mp4(?:\?[^\s"\x27]*)?)'),
+        ];
+        for (final p in patterns) {
+          final m = p.firstMatch(html);
+          if (m != null) {
+            final url = _unescape(m.group(1)!);
+            if (url.startsWith('https://') &&
+                url.contains('.mp4') &&
+                !url.contains('embed')) {
+              debugPrint('[Threads] Embed: found via JSON/regex pattern');
+              return url;
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('[Threads] Embed fetch error: $e');
       }
     }
-    return items;
+    return null;
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
