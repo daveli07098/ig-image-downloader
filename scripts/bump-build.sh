@@ -5,8 +5,9 @@
 #                  AppBar   →  v1.0.0.N
 #
 # Usage (from repo root):
-#   ./scripts/bump-build.sh          # bump + commit
-#   ./scripts/bump-build.sh --build  # bump + commit + build APK + adb install -r
+#   ./scripts/bump-build.sh               # bump + commit (standalone)
+#   ./scripts/bump-build.sh --no-commit   # bump + stage only (fold into a code commit)
+#   ./scripts/bump-build.sh --build       # bump + commit + build APK + adb install -r
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -36,9 +37,15 @@ sed -i '' "s/'${OLD_DISPLAY_VERSION}'/'${NEW_DISPLAY_VERSION}'/" "$HOME_SCREEN"
 
 # ── Commit ────────────────────────────────────────────────────────────────────
 git add "$PUBSPEC" "$HOME_SCREEN"
+if [[ "${1:-}" == "--no-commit" ]]; then
+  # Files are staged — caller includes them in their own code commit.
+  echo "Staged version bump (${NEW_DISPLAY_VERSION}) — add these files to your commit:"
+  echo "  $PUBSPEC"
+  echo "  $HOME_SCREEN"
+  exit 0
+fi
 git commit -m "chore: bump to ${NEW_DISPLAY_VERSION}"
 echo "Committed: $(git rev-parse --short HEAD)"
-
 # ── Optionally build + install ────────────────────────────────────────────────
 if [[ "${1:-}" == "--build" ]]; then
   echo "Building release APK…"

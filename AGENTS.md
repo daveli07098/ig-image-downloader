@@ -35,7 +35,12 @@ downloads chosen items to a persistent dated folder **and** the device gallery.
 After any non-trivial session, run the session-wrap workflow:
 
 1. Identify what was produced: source changes, configs, discoveries, or procedures.
-2. Stage and commit source changes using conventional commits.
+2. Bump version and commit source changes together — one commit per logical change:
+   ```bash
+   ./scripts/bump-build.sh --no-commit
+   git add <changed files> pubspec.yaml lib/screens/home_screen.dart
+   git commit -m "type(scope): description"
+   ```
 3. Write `docs/<topic>.md` for reusable findings or procedures.
 4. Append to `CHANGELOG.md` using dated session blocks:
 

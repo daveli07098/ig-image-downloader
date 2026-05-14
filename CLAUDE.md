@@ -59,7 +59,9 @@ Require explicit user request:
 - A refactor or cleanup is complete
 
 ```bash
-git add <changed files>
+# Bump version and stage it alongside code changes — one commit
+./scripts/bump-build.sh --no-commit
+git add <changed files> pubspec.yaml lib/screens/home_screen.dart
 git commit -m "type(scope): description"
 git rev-parse --short HEAD
 ```
