@@ -513,16 +513,27 @@ class DownloaderService {
     final isIgCdn = item.mediaUrl.contains('cdninstagram.com') ||
         item.mediaUrl.contains('instagram.com') ||
         item.mediaUrl.contains('fbcdn.net');
-    await _dio.download(
-      item.mediaUrl,
-      savePath,
-      options: (sessionId != null && isIgCdn)
-          ? Options(headers: {'Cookie': 'sessionid=$sessionId'})
-          : null,
-      onReceiveProgress: (received, total) {
-        if (total > 0) onProgress(received / total);
-      },
-    );
+    try {
+      await _dio.download(
+        item.mediaUrl,
+        savePath,
+        options: (sessionId != null && isIgCdn)
+            ? Options(headers: {'Cookie': 'sessionid=$sessionId'})
+            : null,
+        onReceiveProgress: (received, total) {
+          if (total > 0) onProgress(received / total);
+        },
+      );
+    } catch (e) {
+      // If the download threw but the file was written anyway (e.g. OS-level
+      // "file exists" error on Android public storage, or a partial write that
+      // completed), treat it as success rather than surfacing an error.
+      if (File(savePath).existsSync()) {
+        debugPrint('[IG] Download error but file exists, treating as done: $savePath');
+        return savePath;
+      }
+      rethrow;
+    }
 
     // Tell Android's MediaStore about the new file so it shows up in the
     // media browser (gallery apps, Files app) immediately, without copying
