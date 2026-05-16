@@ -491,7 +491,9 @@ class DownloaderService {
   /// Downloads [item] to the per-account folder inside public Downloads,
   /// then notifies Android's media scanner so it appears in the media browser
   /// without being duplicated into Pictures. Returns the saved file path.
-  Future<String> downloadItem(
+  /// Returns `({path, skipped})` where [skipped] is true when the file
+  /// already existed on disk and the download was bypassed.
+  Future<({String path, bool skipped})> downloadItem(
     MediaItem item, {
     required void Function(double progress) onProgress,
   }) async {
@@ -505,7 +507,7 @@ class DownloaderService {
     // that was actually a "file exists" OS error on Android public storage).
     if (File(savePath).existsSync()) {
       debugPrint('[IG] Already exists, skipping download: $savePath');
-      return savePath;
+      return (path: savePath, skipped: true);
     }
 
     final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
@@ -530,7 +532,7 @@ class DownloaderService {
       // completed), treat it as success rather than surfacing an error.
       if (File(savePath).existsSync()) {
         debugPrint('[IG] Download error but file exists, treating as done: $savePath');
-        return savePath;
+        return (path: savePath, skipped: true);
       }
       rethrow;
     }
@@ -550,6 +552,6 @@ class DownloaderService {
       }
     }
 
-    return savePath;
+    return (path: savePath, skipped: false);
   }
 }

@@ -17,6 +17,7 @@ class DownloadJob {
   final double progress;      // 0.0 – 1.0
   final String? errorMsg;
   final String? outputPath;   // permanent file path after successful download
+  final bool skipped;         // true when file already existed and download was skipped
   final DateTime createdAt;
 
   const DownloadJob({
@@ -28,6 +29,7 @@ class DownloadJob {
     this.progress = 0.0,
     this.errorMsg,
     this.outputPath,
+    this.skipped = false,
     required this.createdAt,
   });
 
@@ -40,6 +42,7 @@ class DownloadJob {
     double? progress,
     String? errorMsg,
     String? outputPath,
+    bool? skipped,
     DateTime? createdAt,
   }) {
     return DownloadJob(
@@ -51,6 +54,7 @@ class DownloadJob {
       progress: progress ?? this.progress,
       errorMsg: errorMsg ?? this.errorMsg,
       outputPath: outputPath ?? this.outputPath,
+      skipped: skipped ?? this.skipped,
       createdAt: createdAt ?? this.createdAt,
     );
   }
@@ -64,6 +68,7 @@ class DownloadJob {
         'progress': progress,
         'errorMsg': errorMsg,
         'outputPath': outputPath,
+        'skipped': skipped,
         'createdAt': createdAt.millisecondsSinceEpoch,
       };
 
@@ -83,6 +88,7 @@ class DownloadJob {
         progress: (j['progress'] as num?)?.toDouble() ?? 0,
         errorMsg: j['errorMsg'] as String?,
         outputPath: j['outputPath'] as String?,
+        skipped: j['skipped'] as bool? ?? false,
         createdAt: DateTime.fromMillisecondsSinceEpoch(
             j['createdAt'] as int),
       );

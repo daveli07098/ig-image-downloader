@@ -181,14 +181,25 @@ class _StatusText extends StatelessWidget {
           style: TextStyle(fontSize: 12, color: cs.primary),
         ),
       JobStatus.done => Row(children: [
-          const Icon(Icons.check_circle_rounded, size: 14, color: Colors.green),
+          Icon(
+            job.skipped
+                ? Icons.skip_next_rounded
+                : Icons.check_circle_rounded,
+            size: 14,
+            color: job.skipped ? Colors.grey : Colors.green,
+          ),
           const SizedBox(width: 4),
           Flexible(
             child: Text(
-              job.outputPath != null
-                  ? StorageService.displayLabel(job.outputPath!)
-                  : 'Saved to gallery',
-              style: const TextStyle(fontSize: 12, color: Colors.green),
+              job.skipped
+                  ? 'Already downloaded — skipped'
+                  : (job.outputPath != null
+                      ? StorageService.displayLabel(job.outputPath!)
+                      : 'Saved to gallery'),
+              style: TextStyle(
+                fontSize: 12,
+                color: job.skipped ? Colors.grey : Colors.green,
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),

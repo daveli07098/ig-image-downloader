@@ -246,7 +246,7 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     const maxAttempts = 3;
     for (var attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        final savedPath = await service.downloadItem(
+        final result = await service.downloadItem(
           job.item,
           onProgress: (progress) {
             _updateJob(jobId, (j) => j.copyWith(progress: progress));
@@ -257,7 +257,8 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
           (j) => j.copyWith(
             status: JobStatus.done,
             progress: 1.0,
-            outputPath: savedPath,
+            outputPath: result.path,
+            skipped: result.skipped,
           ),
         );
         _pruneFinished();
