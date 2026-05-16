@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:webview_flutter/webview_flutter.dart';
@@ -132,6 +133,8 @@ class _LoginScreenState extends State<LoginScreen> {
     if (token != null && token.isNotEmpty) {
       _captured = true;
       await SessionService.saveSessionId(widget.platform, token);
+      // Resolve display username in background — non-blocking
+      _fetchAndSaveUsername(token).ignore();
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Logged in to ${_cfg.label} — unlocked!')),
@@ -139,6 +142,108 @@ class _LoginScreenState extends State<LoginScreen> {
         Navigator.of(context).pop(true);
       }
     }
+  }
+
+  // ── Username resolution ────────────────────────────────────────────────
+
+  Future<void> _fetchAndSaveUsername(String token) async {
+    try {
+      String? username;
+      switch (widget.platform) {
+        case LoginPlatform.instagram:
+          username = await _fetchIgUsername(token);
+        case LoginPlatform.x:
+          username = await _fetchXUsername(token);
+        case LoginPlatform.facebook:
+          username = _extractFbUserId(token);
+      }
+      if (username != null && username.isNotEmpty) {
+        await SessionService.saveUsername(widget.platform, username);
+      }
+    } catch (e) {
+      debugPrint('[Login/${_cfg.label}] username fetch failed: $e');
+    }
+  }
+
+  /// Calls the Instagram internal API to get the logged-in user's username.
+  Future<String?> _fetchIgUsername(String sessionId) async {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+              'AppleWebKit/605.1.15 (KHTML, like Gecko) '
+              'Version/17.0 Mobile/15E148 Safari/604.1',
+          'Cookie': 'sessionid=$sessionId',
+          'x-ig-app-id': '936619743392459',
+        },
+      ));
+      final resp = await dio.get<Map<String, dynamic>>(
+        'https://www.instagram.com/api/v1/accounts/current_user/',
+        queryParameters: {'edit': 'true'},
+      );
+      final user = resp.data?['user'] as Map<String, dynamic>?;
+      return user?['username'] as String?;
+    } catch (e) {
+      debugPrint('[Login] IG username fetch failed: $e');
+      return null;
+    }
+  }
+
+  /// Calls the X/Twitter API to get the logged-in screen name.
+  /// Requires both auth_token and ct0 (CSRF) cookies from the WebView.
+  Future<String?> _fetchXUsername(String authToken) async {
+    try {
+      final rawCookies = await _readRawCookiesFromNative('https://x.com');
+      String? ct0;
+      if (rawCookies != null) {
+        for (final part in rawCookies.split(';')) {
+          final kv = part.trim().split('=');
+          if (kv.length >= 2 && kv[0].trim() == 'ct0') {
+            ct0 = kv.sublist(1).join('=').trim();
+            break;
+          }
+        }
+      }
+      if (ct0 == null) return null;
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+              'AppleWebKit/537.36 (KHTML, like Gecko) '
+              'Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'auth_token=$authToken; ct0=$ct0',
+          'x-csrf-token': ct0,
+          // X's public bearer token (same across all web clients)
+          'Authorization':
+              'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs'
+              '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+        },
+      ));
+      final resp = await dio.get<Map<String, dynamic>>(
+        'https://api.x.com/1.1/account/verify_credentials.json',
+        queryParameters: {'include_entities': 'false', 'skip_status': 'true'},
+      );
+      return resp.data?['screen_name'] as String?;
+    } catch (e) {
+      debugPrint('[Login] X username fetch failed: $e');
+      return null;
+    }
+  }
+
+  /// Extracts the Facebook numeric user ID (c_user) from the stored cookie string.
+  String? _extractFbUserId(String cookieString) {
+    for (final part in cookieString.split(';')) {
+      final kv = part.trim().split('=');
+      if (kv.length >= 2 && kv[0].trim() == 'c_user') {
+        return kv[1].trim(); // numeric Facebook user ID
+      }
+    }
+    return null;
   }
 
   Future<String?> _readRawCookiesFromNative(String domain) async {

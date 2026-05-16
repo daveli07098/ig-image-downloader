@@ -23,6 +23,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _igLoggedIn = false;
   bool _xLoggedIn = false;
   bool _fbLoggedIn = false;
+  String? _igUsername;
+  String? _xUsername;
+  String? _fbUsername;
 
   @override
   void initState() {
@@ -34,7 +37,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final ig = await SessionService.isLoggedIn(LoginPlatform.instagram);
     final x = await SessionService.isLoggedIn(LoginPlatform.x);
     final fb = await SessionService.isLoggedIn(LoginPlatform.facebook);
-    if (mounted) setState(() { _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb; });
+    final igUser = ig ? await SessionService.getUsername(LoginPlatform.instagram) : null;
+    final xUser = x ? await SessionService.getUsername(LoginPlatform.x) : null;
+    final fbUser = fb ? await SessionService.getUsername(LoginPlatform.facebook) : null;
+    if (mounted) setState(() {
+      _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb;
+      _igUsername = igUser; _xUsername = xUser; _fbUsername = fbUser;
+    });
   }
 
   @override
@@ -80,6 +89,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         igLoggedIn: _igLoggedIn,
         xLoggedIn: _xLoggedIn,
         fbLoggedIn: _fbLoggedIn,
+        igUsername: _igUsername,
+        xUsername: _xUsername,
+        fbUsername: _fbUsername,
         onLogin: (platform) async {
           final nav = Navigator.of(context);
           nav.pop();
@@ -138,7 +150,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.14',
+                    'v1.0.0.15',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -340,6 +352,9 @@ class _AccountsSheet extends StatelessWidget {
     required this.igLoggedIn,
     required this.xLoggedIn,
     required this.fbLoggedIn,
+    this.igUsername,
+    this.xUsername,
+    this.fbUsername,
     required this.onLogin,
     required this.onLogout,
   });
@@ -347,6 +362,9 @@ class _AccountsSheet extends StatelessWidget {
   final bool igLoggedIn;
   final bool xLoggedIn;
   final bool fbLoggedIn;
+  final String? igUsername;
+  final String? xUsername;
+  final String? fbUsername;
   final void Function(LoginPlatform) onLogin;
   final void Function(LoginPlatform) onLogout;
 
@@ -362,6 +380,11 @@ class _AccountsSheet extends StatelessWidget {
       LoginPlatform.instagram: igLoggedIn,
       LoginPlatform.x: xLoggedIn,
       LoginPlatform.facebook: fbLoggedIn,
+    };
+    final usernames = {
+      LoginPlatform.instagram: igUsername,
+      LoginPlatform.x: xUsername,
+      LoginPlatform.facebook: fbUsername,
     };
     final cs = Theme.of(context).colorScheme;
 
@@ -387,6 +410,7 @@ class _AccountsSheet extends StatelessWidget {
                 icon: p.icon,
                 label: p.label,
                 isLoggedIn: loggedIn[p.platform]!,
+                username: usernames[p.platform],
                 onLogin: () => onLogin(p.platform),
                 onLogout: () => onLogout(p.platform),
               ),
@@ -404,6 +428,7 @@ class _PlatformRow extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.isLoggedIn,
+    this.username,
     required this.onLogin,
     required this.onLogout,
   });
@@ -411,6 +436,7 @@ class _PlatformRow extends StatelessWidget {
   final IconData icon;
   final String label;
   final bool isLoggedIn;
+  final String? username;
   final VoidCallback onLogin;
   final VoidCallback onLogout;
 
@@ -429,7 +455,9 @@ class _PlatformRow extends StatelessWidget {
               children: [
                 Text(label, style: Theme.of(context).textTheme.bodyLarge),
                 Text(
-                  isLoggedIn ? 'Logged in' : 'Not logged in',
+                  isLoggedIn
+                      ? (username != null ? '@$username' : 'Logged in')
+                      : 'Not logged in',
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: isLoggedIn ? cs.primary : cs.onSurfaceVariant,
                       ),
