@@ -39,7 +39,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final fb = await SessionService.isLoggedIn(LoginPlatform.facebook);
     final igUser = ig ? await SessionService.getUsername(LoginPlatform.instagram) : null;
     final xUser = x ? await SessionService.getUsername(LoginPlatform.x) : null;
-    final fbUser = fb ? await SessionService.getUsername(LoginPlatform.facebook) : null;
+    final fbUserRaw = fb ? await SessionService.getUsername(LoginPlatform.facebook) : null;
+    // Filter out numeric-only IDs saved by older versions (c_user cookie value)
+    final fbUser = (fbUserRaw != null && RegExp(r'^\d+$').hasMatch(fbUserRaw))
+        ? null
+        : fbUserRaw;
     if (mounted) setState(() {
       _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb;
       _igUsername = igUser; _xUsername = xUser; _fbUsername = fbUser;
@@ -150,7 +154,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.20',
+                    'v1.0.0.21',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],

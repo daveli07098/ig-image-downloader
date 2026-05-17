@@ -154,9 +154,10 @@ class FacebookDownloaderService {
     // ── Video embed URL strategy ────────────────────────────────────────
     // Facebook reels/videos never include og:video in bot UA responses — the
     // actual MP4 URL lives in the /video/embed?video_id=<id> endpoint.
-    // When og:type is "video.other" and no MP4 found yet, extract the video
+    // When og:type starts with "video" and no MP4 found yet, extract the video
     // ID from the resolved og:url or final URL and fetch the embed page.
-    if (realVideoUrl == null && ogType == 'video.other') {
+    // Also try the Facebook video plugin URL for posts without a direct video ID.
+    if (realVideoUrl == null && ogType != null && ogType!.startsWith('video')) {
       final videoId = _extractVideoIdFromUrl(ogUrl ?? finalUrl);
       if (videoId != null) {
         try {
@@ -181,6 +182,36 @@ class FacebookDownloaderService {
           }
         } catch (e) {
           debugPrint('[FB] Video embed fetch failed: $e');
+        }
+      }
+
+      // If still no video ID found (e.g. og:url is /posts/<id>), try the
+      // Facebook video plugin endpoint using the resolved post URL directly.
+      if (realVideoUrl == null && (ogUrl ?? finalUrl).isNotEmpty) {
+        try {
+          final postUrl = Uri.encodeComponent(ogUrl ?? finalUrl);
+          final pluginUrl =
+              'https://www.facebook.com/plugins/video.php?href=$postUrl';
+          debugPrint('[FB] Trying video plugin URL: $pluginUrl');
+          final pluginDio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+            followRedirects: true,
+            maxRedirects: 8,
+            headers: {
+              'User-Agent': _botUA,
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          ));
+          final pluginResp = await pluginDio.get<String>(pluginUrl);
+          if (pluginResp.statusCode == 200 && pluginResp.data != null) {
+            realVideoUrl = _extractVideoUrlFromJson(pluginResp.data!) ??
+                _extractVideoTagSrc(pluginResp.data!);
+            debugPrint(
+                '[FB] Plugin URL video: ${realVideoUrl != null ? "found" : "not found"}');
+          }
+        } catch (e) {
+          debugPrint('[FB] Video plugin fetch failed: $e');
         }
       }
     }
@@ -363,15 +394,18 @@ class FacebookDownloaderService {
 
     // Facebook uses various field names for image URIs in its JS payloads.
     // Both scontent (user photos) and fbcdn (general CDN) are valid image hosts.
+    // Use [^"]+ (allows backslash) so JSON-encoded URLs like https:\/\/scontent...
+    // are matched and then unescaped by _unescape(). Avoid [^"\\] which would
+    // stop at the first \/ and never match anything in the page JSON.
     final patterns = [
       RegExp(
-        r'"uri"\s*:\s*"(https://[^"\\]+(?:scontent|fbcdn)[^"\\]+\.(?:jpg|jpeg|png|webp)[^"\\]*)"',
+        r'"uri"\s*:\s*"(https[^"]*(?:scontent|fbcdn)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
       ),
       RegExp(
-        r'"src"\s*:\s*"(https://[^"\\]+(?:scontent|fbcdn)[^"\\]+\.(?:jpg|jpeg|png|webp)[^"\\]*)"',
+        r'"src"\s*:\s*"(https[^"]*(?:scontent|fbcdn)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
       ),
       RegExp(
-        r'"url"\s*:\s*"(https://[^"\\]+(?:scontent|fbcdn)[^"\\]+\.(?:jpg|jpeg|png|webp)[^"\\]*)"',
+        r'"url"\s*:\s*"(https[^"]*(?:scontent|fbcdn)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
       ),
     ];
 

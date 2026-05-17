@@ -162,7 +162,7 @@ class _LoginScreenState extends State<LoginScreen> {
       case LoginPlatform.x:
         return _fetchXUsername(token);
       case LoginPlatform.facebook:
-        return _extractFbUserId(token);
+        return _fetchFbUsername(token);
     }
   }
 
@@ -195,6 +195,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
     // ── Fallback: one-time private API call (only if JS failed) ────────────
     // Risk is low — this fires at most once per login session, never per-download.
+    // Including x-ig-app-id here is intentional: the Instagram web app sends it
+    // on every page load. We only avoided it in per-download API calls.
     try {
       final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
       if (sessionId == null) return null;
@@ -207,10 +209,10 @@ class _LoginScreenState extends State<LoginScreen> {
               'AppleWebKit/537.36 (KHTML, like Gecko) '
               'Chrome/124.0.0.0 Safari/537.36',
           'Cookie': 'sessionid=$sessionId',
+          'x-ig-app-id': '936619743392459',
         },
       ));
-      // Use the public-facing profile redirect — no private app ID required.
-      // A logged-in browser hitting this endpoint returns a JSON with username.
+      // Use the public-facing profile redirect — requires x-ig-app-id on web.
       final resp = await dio.get<Map<String, dynamic>>(
         'https://www.instagram.com/api/v1/accounts/current_user/',
         queryParameters: {'edit': 'true'},
@@ -264,6 +266,43 @@ class _LoginScreenState extends State<LoginScreen> {
       debugPrint('[Login] X username fetch failed: $e');
       return null;
     }
+  }
+
+  /// Resolves the Facebook display name/username by following the /me redirect
+  /// with the authenticated session. Falls back to null ("Logged in" shown) if
+  /// the user has no custom username (profile.php?id=... redirect).
+  Future<String?> _fetchFbUsername(String cookieString) async {
+    try {
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 15),
+        followRedirects: true,
+        maxRedirects: 5,
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+          'Cookie': cookieString,
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      ));
+      final resp = await dio.get<String>('https://www.facebook.com/me');
+      final finalUrl = resp.realUri.toString();
+      // /me redirects to /<username> or /profile.php?id=<numeric>
+      final m =
+          RegExp(r'facebook\.com/([^/?#]+)').firstMatch(finalUrl);
+      final slug = m?.group(1);
+      // Reject numeric-only slugs (no custom username set) and profile.php
+      if (slug != null &&
+          slug != 'me' &&
+          !slug.startsWith('profile.php') &&
+          !RegExp(r'^\d+$').hasMatch(slug)) {
+        return slug;
+      }
+    } catch (e) {
+      debugPrint('[Login/FB] Username fetch failed: $e');
+    }
+    return null; // show "Logged in" when no custom username available
   }
 
   /// Extracts the Facebook numeric user ID (c_user) from the stored cookie string.
