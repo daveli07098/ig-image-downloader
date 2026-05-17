@@ -88,52 +88,60 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           'Accept-Language': 'en-US,en;q=0.9',
         },
       ));
-      // Try home page then accounts/edit in case one has __NEXT_DATA__ with viewer
       for (final url in [
         'https://www.instagram.com/',
         'https://www.instagram.com/accounts/edit/',
       ]) {
         final resp = await dio.get<String>(url);
         final finalPath = resp.realUri.path;
-        if (finalPath.contains('/accounts/login') || finalPath.contains('/challenge')) {
-          debugPrint('[Home] IG resolve: redirected to $finalPath, bailing');
-          return null;
-        }
         final html = resp.data ?? '';
-        debugPrint('[Home] IG resolve: $url ${html.length} bytes, '
-            '__NEXT_DATA__: ${html.contains("__NEXT_DATA__")}');
-        final sm = RegExp(
+        debugPrint('[Home] IG resolve: $url => ${resp.realUri} '
+            '${html.length}b __NEXT_DATA__:${html.contains("__NEXT_DATA__")} '
+            '_sharedData:${html.contains("_sharedData")}');
+        if (finalPath.contains('/accounts/login') || finalPath.contains('/challenge')) {
+          continue; // try next URL
+        }
+        // Strategy 1: __NEXT_DATA__ (Next.js SSR)
+        final ndMatch = RegExp(
                 r'<script id="__NEXT_DATA__"[^>]*>({.+?})</script>',
                 dotAll: true)
             .firstMatch(html);
-        if (sm != null) {
+        if (ndMatch != null) {
           try {
-            final data = jsonDecode(sm.group(1)!) as Map<String, dynamic>;
-            final pProps =
-                (data['props'] as Map?)?['pageProps'] as Map? ?? {};
-            // Try several known viewer-key names
-            for (final key in ['viewer', 'user', 'currentUser', 'loggedInUser']) {
+            final data = jsonDecode(ndMatch.group(1)!) as Map<String, dynamic>;
+            final pProps = (data['props'] as Map?)?['pageProps'] as Map? ?? {};
+            debugPrint('[Home] IG resolve: pageProps keys=${pProps.keys.take(10).toList()}');
+            for (final key in ['viewer', 'user', 'currentUser', 'loggedInUser', 'form']) {
               final obj = pProps[key];
-              if (obj is Map && obj['username'] is String) {
-                return obj['username'] as String;
-              }
+              if (obj is Map && obj['username'] is String) return obj['username'] as String;
             }
-            // Also try data.viewer (GraphQL-style pages)
             final gql = (data['data'] as Map?)?['viewer'];
-            if (gql is Map && gql['username'] is String) {
-              return gql['username'] as String;
-            }
-            debugPrint('[Home] IG resolve: __NEXT_DATA__ parsed, '
-                'pageProps keys: ${pProps.keys.take(10).toList()}');
+            if (gql is Map && gql['username'] is String) return gql['username'] as String;
           } catch (e) {
-            debugPrint('[Home] IG resolve: JSON parse error: $e');
+            debugPrint('[Home] IG resolve: __NEXT_DATA__ parse: $e');
           }
         }
-        // Broad fallback: first "username":"<value>" near "viewer" in HTML
-        final m = RegExp(
-                r'"viewer"[^{]{0,40}"username"\s*:\s*"([a-zA-Z0-9._]{2,30})"')
-            .firstMatch(html);
-        if (m != null) return m.group(1);
+        // Strategy 2: window._sharedData (older IG pages)
+        final sdMatch =
+            RegExp(r'window\._sharedData\s*=\s*({.+?});\s*</script>').firstMatch(html);
+        if (sdMatch != null) {
+          try {
+            final data = jsonDecode(sdMatch.group(1)!) as Map<String, dynamic>;
+            final viewer = (data['config'] as Map?)?['viewer'];
+            if (viewer is Map && viewer['username'] is String) return viewer['username'] as String;
+          } catch (e) {
+            debugPrint('[Home] IG resolve: _sharedData parse: $e');
+          }
+        }
+        // Strategy 3: broad regex — safer on edit page where first username
+        // should be the logged-in user, not another user from the feed.
+        if (url.contains('/accounts/edit')) {
+          final m = RegExp(r'"username"\s*:\s*"([a-zA-Z0-9._]{2,30})"').firstMatch(html);
+          if (m != null) {
+            debugPrint('[Home] IG resolve: broad regex => ${m.group(1)}');
+            return m.group(1);
+          }
+        }
       }
       return null;
     } catch (e) {
@@ -231,7 +239,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         connectTimeout: const Duration(seconds: 10),
         receiveTimeout: const Duration(seconds: 15),
         followRedirects: true,
-        maxRedirects: 5,
+        maxRedirects: 8,
         headers: {
           'User-Agent': 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 '
               '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
@@ -241,13 +249,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       ));
       final resp = await dio.get<String>('https://www.facebook.com/me');
       final finalUrl = resp.realUri.toString();
-      final m = RegExp(r'facebook\.com/([^/?#]+)').firstMatch(finalUrl);
+      debugPrint('[Home] FB resolve: final URL = $finalUrl');
+      // Match first path segment from any facebook domain
+      final m = RegExp(r'facebook\.com/([^/?#\s]+)').firstMatch(finalUrl);
       final slug = m?.group(1);
+      debugPrint('[Home] FB resolve: slug = $slug');
+      const skipSlugs = {
+        'me', 'login', 'checkpoint', 'recover', 'home', 'r.php',
+        'ajax', 'dialog', 'sharer', 'unsupportedbrowser', 'privacy',
+      };
       if (slug != null &&
-          slug != 'me' &&
+          !skipSlugs.contains(slug.toLowerCase()) &&
           !slug.startsWith('profile.php') &&
           !RegExp(r'^\d+$').hasMatch(slug)) {
         return slug;
+      }
+      // Fallback: scan page HTML for a username JSON field
+      final html = resp.data ?? '';
+      final hm = RegExp(r'"username"\s*:\s*"([a-zA-Z0-9.]{3,60})"').firstMatch(html);
+      if (hm != null) {
+        debugPrint('[Home] FB resolve: HTML match => ${hm.group(1)}');
+        return hm.group(1);
       }
     } catch (e) {
       debugPrint('[Home] FB username resolve: $e');
@@ -362,7 +384,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.40',
+                    'v1.0.0.41',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
