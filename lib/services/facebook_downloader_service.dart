@@ -434,7 +434,8 @@ class FacebookDownloaderService {
             !url.contains('video/embed') &&
             !url.contains('.jpg') &&
             !url.contains('.png')) {
-          debugPrint('[FB] Video URL found via: ${pattern.pattern.substring(0, 30)}');
+          final preview = pattern.pattern;
+          debugPrint('[FB] Video URL found via: ${preview.substring(0, preview.length.clamp(0, 40))}');
           return url;
         }
       }
