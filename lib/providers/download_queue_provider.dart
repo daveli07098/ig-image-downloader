@@ -195,9 +195,9 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
       await _run(jobId);
 
-      // Pause between downloads — random 1–3 s to avoid rate-limiting
+      // Pause between downloads — random 3–10 s to reduce rate-limiting risk
       if (_pendingIds.isNotEmpty) {
-        final pauseMs = 1000 + _random.nextInt(2000);
+        final pauseMs = 3000 + _random.nextInt(7000);
         await Future.delayed(Duration(milliseconds: pauseMs));
       }
     }

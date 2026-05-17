@@ -169,7 +169,10 @@ class _LoginScreenState extends State<LoginScreen> {
   /// Reads the Instagram username from the already-loaded WebView page via JS.
   /// NO extra HTTP requests are made — the previous x-ig-app-id API call was
   /// triggering Instagram's automated-behaviour detection.
+  /// Falls back to a one-time private API call only if JS yields nothing
+  /// (e.g. Instagram changes their page structure).
   Future<String?> _fetchIgUsernameFromWebView() async {
+    // ── Try 1: read from __NEXT_DATA__ in the already-loaded page ──────────
     try {
       final result = await _webController.runJavaScriptReturningResult(r'''
         (function() {
@@ -185,9 +188,37 @@ class _LoginScreenState extends State<LoginScreen> {
         })()
       ''');
       final str = result.toString().replaceAll('"', '').trim();
-      return (str.isEmpty || str == 'null') ? null : str;
+      if (str.isNotEmpty && str != 'null') return str;
     } catch (e) {
-      debugPrint('[Login] IG username from WebView JS failed: $e');
+      debugPrint('[Login] IG username WebView JS failed: $e');
+    }
+
+    // ── Fallback: one-time private API call (only if JS failed) ────────────
+    // Risk is low — this fires at most once per login session, never per-download.
+    try {
+      final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
+      if (sessionId == null) return null;
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: {
+          'User-Agent':
+              'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+              'AppleWebKit/537.36 (KHTML, like Gecko) '
+              'Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'sessionid=$sessionId',
+        },
+      ));
+      // Use the public-facing profile redirect — no private app ID required.
+      // A logged-in browser hitting this endpoint returns a JSON with username.
+      final resp = await dio.get<Map<String, dynamic>>(
+        'https://www.instagram.com/api/v1/accounts/current_user/',
+        queryParameters: {'edit': 'true'},
+      );
+      final user = resp.data?['user'] as Map<String, dynamic>?;
+      return user?['username'] as String?;
+    } catch (e) {
+      debugPrint('[Login] IG username API fallback failed: $e');
       return null;
     }
   }
