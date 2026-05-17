@@ -322,29 +322,33 @@ class FacebookDownloaderService {
         debugPrint('[FB] Auth fetch failed: $e');
       }
 
-      // mbasic.facebook.com fallback for multi-photo albums.
-      // mbasic is Facebook's server-rendered HTML for basic devices — it outputs
-      // all album photos as plain <img> tags with no JavaScript. Works reliably
-      // for extracting carousel images that the SPA version hides behind GraphQL.
-      if (!isVideoPage && allImages.length <= 1) {
+      // mbasic.facebook.com fetch for multi-photo albums.
+      // mbasic is Facebook's server-rendered HTML for basic/text browsers —
+      // the entire post content (photos, caption, reactions) is in plain HTML
+      // with no JavaScript or feed content from other posts.
+      // Always run for non-video pages (regardless of how many images bot UA found)
+      // so we capture the full photo set, not just the OG cover image.
+      if (!isVideoPage) {
         try {
           final parsed = Uri.tryParse(finalUrl);
-          final mbasicUrl = parsed != null
-              ? 'https://mbasic.facebook.com${parsed.path}'
-              : finalUrl
-                  .replaceFirst('https://www.facebook.com',
-                      'https://mbasic.facebook.com')
-                  .split('?')
-                  .first;
-          debugPrint('[FB] Trying mbasic for carousel: $mbasicUrl');
+          // Include query params — /photo?fbid=...&set=pcb.xxx needs fbid and set
+          // to load the correct album; dropping them lands on the wrong page.
+          String mbasicUrl;
+          if (parsed != null) {
+            mbasicUrl = 'https://mbasic.facebook.com${parsed.path}'
+                '${parsed.query.isNotEmpty ? '?${parsed.query}' : ''}';
+          } else {
+            mbasicUrl = finalUrl.replaceFirst(
+                'https://www.facebook.com', 'https://mbasic.facebook.com');
+          }
+          debugPrint('[FB] mbasic carousel: $mbasicUrl');
           final mbasicDio = Dio(BaseOptions(
             connectTimeout: const Duration(seconds: 15),
             receiveTimeout: const Duration(seconds: 30),
             followRedirects: true,
             maxRedirects: 8,
             headers: {
-              // Desktop UA — mobile UAs may trigger fb:// / intent:// redirects
-              // even on mbasic.facebook.com. Desktop UA gets server-rendered HTML.
+              // Desktop UA — avoids fb:// / intent:// redirects on mbasic too.
               'User-Agent': _authUA,
               'Cookie': fbCookies,
               'Referer': 'https://mbasic.facebook.com/',
@@ -355,27 +359,59 @@ class FacebookDownloaderService {
           final mbasicResp = await mbasicDio.get<String>(mbasicUrl);
           if (mbasicResp.statusCode == 200 && mbasicResp.data != null) {
             final mbasicHtml = mbasicResp.data!;
-            // mbasic renders each album photo in an <img src="..."> tag.
+
+            // Phase 1 — Photo-link-anchored extraction.
+            // In mbasic, every post photo is wrapped in an <a href="/photo.php?..."
+            // or <a href="/photo?..."> link. Profile pictures, comment avatars, and
+            // navigation elements are NOT linked to photo view pages, so this
+            // pattern selects only actual post photos.
+            final photoAnchorRe = RegExp(
+              r'href="[^"]*(?:photo\.php|/photo[/?])[^"]*"',
+              caseSensitive: false,
+            );
             final imgRe = RegExp(
               r'<img[^>]+src="(https://[^"]*(?:scontent|fbcdn)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
               caseSensitive: false,
             );
-            for (final m in imgRe.allMatches(mbasicHtml)) {
-              final imgUrl = _unescape(m.group(1)!);
-              if (!imgUrl.contains('/profile') &&
-                  !imgUrl.contains('/rsrc') &&
-                  !imgUrl.contains('/emoji') &&
-                  !imgUrl.contains('static.xx.fbcdn') &&
-                  !allImages.contains(imgUrl)) {
-                allImages.add(imgUrl);
+            for (final anchor in photoAnchorRe.allMatches(mbasicHtml)) {
+              // Scan the 600 chars after each photo link for the <img src>.
+              final end = (anchor.end + 600).clamp(anchor.end, mbasicHtml.length);
+              final slice = mbasicHtml.substring(anchor.end, end);
+              final img = imgRe.firstMatch(slice);
+              if (img != null) {
+                final imgUrl = _unescape(img.group(1)!);
+                if (!imgUrl.contains('/profile') &&
+                    !imgUrl.contains('/rsrc') &&
+                    !imgUrl.contains('/emoji') &&
+                    !imgUrl.contains('static.xx.fbcdn') &&
+                    !allImages.contains(imgUrl)) {
+                  allImages.add(imgUrl);
+                }
               }
             }
-            // Also run JSON extraction in case mbasic embeds serialized state.
-            _extractCarouselImagesFromJson(mbasicHtml, allImages);
-            debugPrint('[FB] mbasic carousel: ${allImages.length} images total');
+
+            // Phase 2 — Broad scan fallback (only if no photo links found).
+            // Some post types (text + single photo, or restricted albums) may not
+            // render /photo.php anchor links on mbasic. Fall back to scanning all
+            // CDN <img> tags on the page, which are typically just the post photo(s)
+            // plus a small profile thumbnail (filtered out below).
+            if (allImages.isEmpty) {
+              for (final m in imgRe.allMatches(mbasicHtml)) {
+                final imgUrl = _unescape(m.group(1)!);
+                if (!imgUrl.contains('/profile') &&
+                    !imgUrl.contains('/rsrc') &&
+                    !imgUrl.contains('/emoji') &&
+                    !imgUrl.contains('static.xx.fbcdn') &&
+                    !allImages.contains(imgUrl)) {
+                  allImages.add(imgUrl);
+                }
+              }
+            }
+
+            debugPrint('[FB] mbasic: ${allImages.length} images total');
           }
         } catch (e) {
-          debugPrint('[FB] mbasic carousel fetch failed: $e');
+          debugPrint('[FB] mbasic fetch failed: $e');
         }
       }
     }
@@ -400,8 +436,12 @@ class FacebookDownloaderService {
     }
 
     for (var i = 0; i < allImages.length; i++) {
-      // Skip index 0 when a video is present — it's used as the thumbnail
+      // Skip index 0 when a video is present — it's used as the thumbnail.
       if (realVideoUrl != null && i == 0) continue;
+      // For video pages (reels, videos) the only downloadable item is the video.
+      // Any extra images in allImages are keyframes, og:image thumbnails, or page
+      // noise — not independent photos. Skip them to avoid showing garbage items.
+      if (isVideoPage && realVideoUrl != null) continue;
       items.add(MediaItem(
         id: '${items.length}',
         mediaUrl: allImages[i],

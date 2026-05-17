@@ -44,10 +44,11 @@ class _DevLogOverlayState extends State<DevLogOverlay> {
 
   void _onNewLog() {
     if (!mounted) return;
-    // Auto-open when a new fetch session starts (requested by HomeScreen).
+    // Clear the openRequested flag but do NOT auto-open the panel —
+    // the user opens it manually via the bug FAB. Auto-opening is
+    // distracting once media items are shown on screen.
     if (_logger.openRequested) {
       _logger.openRequested = false;
-      _open = true;
     }
     setState(() {});
     if (_open) _scrollToBottom();
