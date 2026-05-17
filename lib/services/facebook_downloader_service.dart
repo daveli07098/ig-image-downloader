@@ -32,6 +32,15 @@ class FacebookDownloaderService {
       'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36';
 
+  // Desktop Chrome UA for authenticated fetch requests.
+  // MUST be desktop (not Android/iOS mobile) — when Facebook receives an
+  // authenticated request from a mobile UA, it responds with a 302 redirect
+  // to intent://native_post/... (Android) or fb:// (iOS), which Dio cannot
+  // follow and crashes. Desktop UAs always get proper HTML back.
+  static const _authUA =
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
   final Dio _dio;
 
   FacebookDownloaderService({Dio? dio})
@@ -273,7 +282,9 @@ class FacebookDownloaderService {
           followRedirects: true,
           maxRedirects: 8,
           headers: {
-            'User-Agent': _browserUA,
+            // Desktop UA — avoids intent:// / fb:// deep-link redirects
+            // that Facebook sends when it detects a mobile authenticated request.
+            'User-Agent': _authUA,
             'Cookie': fbCookies,
             'Referer': 'https://www.facebook.com/',
             'Accept':
@@ -322,11 +333,9 @@ class FacebookDownloaderService {
             followRedirects: true,
             maxRedirects: 8,
             headers: {
-              // Minimal mobile UA — mbasic is designed for simple browsers.
-              'User-Agent':
-                  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
-                  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 '
-                  'Mobile/15E148 Safari/604.1',
+              // Desktop UA — mobile UAs may trigger fb:// / intent:// redirects
+              // even on mbasic.facebook.com. Desktop UA gets server-rendered HTML.
+              'User-Agent': _authUA,
               'Cookie': fbCookies,
               'Referer': 'https://mbasic.facebook.com/',
               'Accept':
@@ -407,7 +416,8 @@ class FacebookDownloaderService {
           followRedirects: true,
           maxRedirects: 8,
           headers: {
-            'User-Agent': _browserUA,
+            // Desktop UA — same reason as earlyAuthDio: avoids intent:// redirects.
+            'User-Agent': _authUA,
             'Cookie': fbCookies,
             'Referer': 'https://www.facebook.com/',
             'Accept':
@@ -417,7 +427,10 @@ class FacebookDownloaderService {
             'sec-fetch-site': 'same-origin',
           },
         ));
-        final authResp = await authDio.get<String>(cleanUrl);
+        // Use resolved URL (not share URL) to avoid an extra redirect hop.
+        final resolvedUrl =
+            finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
+        final authResp = await authDio.get<String>(resolvedUrl);
         if (authResp.statusCode == 200 && authResp.data != null) {
           final authHtml = authResp.data!;
           final authVideoUrl = _extractVideoUrlFromJson(authHtml);
