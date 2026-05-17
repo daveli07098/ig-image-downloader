@@ -131,6 +131,12 @@ class FacebookDownloaderService {
     final allImages = List<String>.from(ogImages);
     _extractCarouselImagesFromJson(html, allImages);
 
+    // Detect video pages by og:type OR URL patterns. Facebook reel URLs often
+    // omit og:type=video when served to the facebookexternalhit bot UA.
+    final isVideoPage = (ogType != null && ogType!.startsWith('video')) ||
+        finalUrl.contains('/reel/') ||
+        cleanUrl.contains('/share/r/');
+
     // ── Real video URL extraction ──────────────────────────────────────────
     // og:video from Facebook is typically an embed iframe URL, not an MP4.
     // Strategy:
@@ -157,7 +163,7 @@ class FacebookDownloaderService {
     // When og:type starts with "video" and no MP4 found yet, extract the video
     // ID from the resolved og:url or final URL and fetch the embed page.
     // Also try the Facebook video plugin URL for posts without a direct video ID.
-    if (realVideoUrl == null && ogType != null && ogType!.startsWith('video')) {
+    if (realVideoUrl == null && isVideoPage) {
       final videoId = _extractVideoIdFromUrl(ogUrl ?? finalUrl);
       if (videoId != null) {
         try {
@@ -245,6 +251,46 @@ class FacebookDownloaderService {
         } catch (e) {
           debugPrint('[FB] Legacy embed fetch failed: $e');
         }
+      }
+    }
+
+    // ── Early auth fetch ───────────────────────────────────────────────────
+    // (a) Video page but no MP4 URL found — auth HTML includes playable_url JSON
+    // (b) Non-video page with ≤1 image — may be a carousel; auth HTML has full album JSON
+    if (fbCookies != null &&
+        ((isVideoPage && realVideoUrl == null) ||
+            (!isVideoPage && allImages.length <= 1))) {
+      debugPrint(
+          '[FB] Auth fetch: needsVideo=${isVideoPage && realVideoUrl == null}, '
+          'needsCarousel=${!isVideoPage && allImages.length <= 1}');
+      try {
+        final earlyAuthDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 30),
+          followRedirects: true,
+          maxRedirects: 8,
+          headers: {
+            'User-Agent': _browserUA,
+            'Cookie': fbCookies,
+            'Referer': 'https://www.facebook.com/',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+          },
+        ));
+        final authResp = await earlyAuthDio.get<String>(cleanUrl);
+        if (authResp.statusCode == 200 && authResp.data != null) {
+          if (realVideoUrl == null) {
+            realVideoUrl = _extractVideoUrlFromJson(authResp.data!);
+          }
+          _extractCarouselImagesFromJson(authResp.data!, allImages);
+          debugPrint(
+              '[FB] Auth result: video=${realVideoUrl != null}, images: ${allImages.length}');
+        }
+      } catch (e) {
+        debugPrint('[FB] Auth fetch failed: $e');
       }
     }
 
@@ -424,10 +470,11 @@ class FacebookDownloaderService {
   }
 
   /// Extracts a numeric video/reel ID from a Facebook URL.
-  /// Matches /reel/<id>/ and /videos/<id>/ path segments.
+  /// Matches /reel/<id>/, /videos/<id>/, and /posts/<id>/ path segments.
+  /// Posts can also be video posts; the post ID is often the video ID.
   static String? _extractVideoIdFromUrl(String url) {
     final re = RegExp(
-      r'/(?:reel|videos|video)/([\d]+)',
+      r'/(?:reel|videos|video|posts)/(\d+)',
       caseSensitive: false,
     );
     return re.firstMatch(url)?.group(1);
