@@ -1,3 +1,4 @@
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -28,6 +29,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   String? _xUsername;
   String? _fbUsername;
 
+  // Used to read WebView cookies (e.g. X's ct0 CSRF token) for on-demand
+  // username resolution without requiring a re-login.
+  static const _cookieChannel = MethodChannel('ig_downloader/cookies');
+
   @override
   void initState() {
     super.initState();
@@ -38,9 +43,26 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final ig = await SessionService.isLoggedIn(LoginPlatform.instagram);
     final x = await SessionService.isLoggedIn(LoginPlatform.x);
     final fb = await SessionService.isLoggedIn(LoginPlatform.facebook);
-    final igUser = ig ? await SessionService.getUsername(LoginPlatform.instagram) : null;
-    final xUser = x ? await SessionService.getUsername(LoginPlatform.x) : null;
-    final fbUserRaw = fb ? await SessionService.getUsername(LoginPlatform.facebook) : null;
+    var igUser = ig ? await SessionService.getUsername(LoginPlatform.instagram) : null;
+    var xUser = x ? await SessionService.getUsername(LoginPlatform.x) : null;
+    var fbUserRaw = fb ? await SessionService.getUsername(LoginPlatform.facebook) : null;
+
+    // Resolve usernames on-demand for sessions that predate username storage
+    // (logged in before this feature was added). Saves result so this only
+    // fires once per platform — subsequent app opens use the cached value.
+    if (ig && igUser == null) {
+      igUser = await _resolveIgUsername();
+      if (igUser != null) await SessionService.saveUsername(LoginPlatform.instagram, igUser);
+    }
+    if (x && xUser == null) {
+      xUser = await _resolveXUsername();
+      if (xUser != null) await SessionService.saveUsername(LoginPlatform.x, xUser);
+    }
+    if (fb && fbUserRaw == null) {
+      fbUserRaw = await _resolveFbUsername();
+      if (fbUserRaw != null) await SessionService.saveUsername(LoginPlatform.facebook, fbUserRaw);
+    }
+
     // Filter out numeric-only IDs saved by older versions (c_user cookie value)
     final fbUser = (fbUserRaw != null && RegExp(r'^\d+$').hasMatch(fbUserRaw))
         ? null
@@ -49,6 +71,106 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb;
       _igUsername = igUser; _xUsername = xUser; _fbUsername = fbUser;
     });
+  }
+
+  Future<String?> _resolveIgUsername() async {
+    try {
+      final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
+      if (sessionId == null) return null;
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+              'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'sessionid=$sessionId',
+          'x-ig-app-id': '936619743392459',
+        },
+      ));
+      final resp = await dio.get<Map<String, dynamic>>(
+        'https://www.instagram.com/api/v1/accounts/current_user/',
+        queryParameters: {'edit': 'true'},
+      );
+      final user = resp.data?['user'] as Map<String, dynamic>?;
+      return user?['username'] as String?;
+    } catch (e) {
+      debugPrint('[Home] IG username resolve: $e');
+      return null;
+    }
+  }
+
+  Future<String?> _resolveXUsername() async {
+    try {
+      final authToken = await SessionService.getSessionId(LoginPlatform.x);
+      if (authToken == null) return null;
+      // ct0 (CSRF token) lives in the WebView CookieManager — still present
+      // after login even without re-launching the WebView.
+      final raw = await _cookieChannel.invokeMethod<String>(
+          'getCookie', {'url': 'https://x.com'});
+      String? ct0;
+      if (raw != null) {
+        for (final part in raw.split(';')) {
+          final kv = part.trim().split('=');
+          if (kv.length >= 2 && kv[0].trim() == 'ct0') {
+            ct0 = kv.sublist(1).join('=').trim();
+            break;
+          }
+        }
+      }
+      if (ct0 == null) return null;
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 10),
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+              'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'auth_token=$authToken; ct0=$ct0',
+          'x-csrf-token': ct0,
+          'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs'
+              '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+        },
+      ));
+      final resp = await dio.get<Map<String, dynamic>>(
+        'https://api.x.com/1.1/account/verify_credentials.json',
+        queryParameters: {'include_entities': 'false', 'skip_status': 'true'},
+      );
+      return resp.data?['screen_name'] as String?;
+    } catch (e) {
+      debugPrint('[Home] X username resolve: $e');
+      return null;
+    }
+  }
+
+  Future<String?> _resolveFbUsername() async {
+    try {
+      final cookies = await SessionService.getSessionId(LoginPlatform.facebook);
+      if (cookies == null) return null;
+      final dio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 15),
+        followRedirects: true,
+        maxRedirects: 5,
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+          'Cookie': cookies,
+          'Accept-Language': 'en-US,en;q=0.9',
+        },
+      ));
+      final resp = await dio.get<String>('https://www.facebook.com/me');
+      final finalUrl = resp.realUri.toString();
+      final m = RegExp(r'facebook\.com/([^/?#]+)').firstMatch(finalUrl);
+      final slug = m?.group(1);
+      if (slug != null &&
+          slug != 'me' &&
+          !slug.startsWith('profile.php') &&
+          !RegExp(r'^\d+$').hasMatch(slug)) {
+        return slug;
+      }
+    } catch (e) {
+      debugPrint('[Home] FB username resolve: $e');
+    }
+    return null;
   }
 
   @override
@@ -158,7 +280,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.36',
+                    'v1.0.0.37',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
