@@ -66,15 +66,36 @@ class ThreadsDownloaderService {
 
   /// [igSessionId] — the Instagram `sessionid` cookie value.
   /// Threads shares Instagram's auth backend, so the same session token works
-  /// on threads.com, enabling access to private posts and full post data.
+  /// on threads.com. As of 2025, Threads requires authentication for ALL
+  /// content — even public posts — via their REST API.
   Future<List<MediaItem>> fetchItems(String url,
       {String? igSessionId}) async {
     final cleanUrl = url.split('?').first;
     debugPrint('[Threads] URL: $cleanUrl  session: ${igSessionId != null ? 'YES' : 'NO'}');
     final username = extractUsername(cleanUrl) ?? 'threads';
 
-    // Inject the Instagram session cookie into both Dio instances when available.
-    // threads.com accepts the same sessionid as instagram.com.
+    // ── Strategy 0: Threads REST API (primary, requires IG session) ───────
+    // Threads removed unauthenticated access in 2025. The REST API at
+    // threads.com/api/v1/media/<id>/info/ is the only reliable strategy.
+    // It uses the same sessionid cookie as instagram.com.
+    if (igSessionId != null) {
+      final shortcode = _extractShortcode(cleanUrl);
+      final postId = shortcode != null ? _shortcodeToId(shortcode) : null;
+      if (postId != null) {
+        try {
+          final apiItems = await _fetchFromApi(postId, igSessionId);
+          if (apiItems.isNotEmpty) {
+            debugPrint('[Threads] API: ${apiItems.length} items');
+            return apiItems;
+          }
+        } catch (e) {
+          debugPrint('[Threads] API failed: $e');
+        }
+      }
+    }
+
+    // Inject the Instagram session cookie into both Dio instances for the
+    // HTML scraping strategies below (may help in edge cases).
     if (igSessionId != null) {
       final cookieHeader = 'sessionid=$igSessionId';
       _desktopDio.options.headers['Cookie'] = cookieHeader;
@@ -161,9 +182,15 @@ class ThreadsDownloaderService {
       debugPrint('[Threads] Bot UA failed: $e');
     }
 
+    if (igSessionId == null) {
+      throw Exception(
+        'Threads now requires login to download content.\n'
+        'Please log in with Instagram in the Accounts tab.',
+      );
+    }
     throw Exception(
-      'No media found in this Threads post.\n'
-      'The post may be private or require login.',
+      'Could not download this Threads post.\n'
+      'The post may have been deleted or made private.',
     );
   }
 
@@ -377,6 +404,60 @@ class ThreadsDownloaderService {
 
   /// Fetches a Threads embed page and extracts the real video CDN URL from it.
   /// The embed page is a public iframe-friendly page that contains the video player.
+  // ── Strategy 0 helpers: REST API ─────────────────────────────────────────
+
+  /// Extracts the post shortcode from a Threads URL.
+  /// e.g. https://www.threads.com/@user/post/ABC123 → "ABC123"
+  static String? _extractShortcode(String url) {
+    final re = RegExp(r'/post/([A-Za-z0-9_-]+)', caseSensitive: false);
+    return re.firstMatch(url)?.group(1);
+  }
+
+  /// Converts a Threads/Instagram post shortcode to its numeric media ID string.
+  /// Uses the same base-64 alphabet as the Instagram shortcode encoding.
+  static String? _shortcodeToId(String shortcode) {
+    const alphabet =
+        'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+    var n = BigInt.zero;
+    for (final char in shortcode.split('')) {
+      final idx = alphabet.indexOf(char);
+      if (idx == -1) return null;
+      n = n * BigInt.from(64) + BigInt.from(idx);
+    }
+    return n.toString();
+  }
+
+  /// Calls the Threads REST API to fetch media info for a post.
+  /// Response format is identical to the Instagram API — reuses _extractFromPost.
+  Future<List<MediaItem>> _fetchFromApi(
+      String mediaId, String sessionId) async {
+    final apiDio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 30),
+      followRedirects: true,
+      maxRedirects: 5,
+      headers: {
+        'User-Agent': _desktopUA,
+        'Cookie': 'sessionid=$sessionId',
+        'Accept': 'application/json',
+        'Accept-Language': 'en-US,en;q=0.9',
+      },
+    ));
+
+    final resp = await apiDio.get<Map<String, dynamic>>(
+      'https://www.threads.com/api/v1/media/$mediaId/info/',
+    );
+    if (resp.statusCode != 200 || resp.data == null) return [];
+
+    final itemsList = resp.data!['items'] as List?;
+    if (itemsList == null || itemsList.isEmpty) return [];
+
+    final post = itemsList.first as Map<String, dynamic>;
+    final username =
+        (_dig(post, ['user', 'username']) as String?) ?? 'threads';
+    return _extractFromPost(post, username);
+  }
+
   Future<String?> _fetchVideoFromEmbedUrl(String embedUrl) async {
     for (final dio in [_botDio, _desktopDio]) {
       try {
