@@ -41,6 +41,14 @@ class FacebookDownloaderService {
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
       '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+  // iOS Safari UA for mbasic.facebook.com — the basic server-rendered Facebook
+  // web UI for devices without the app. Serves plain HTML to mobile UAs without
+  // redirecting to fb:// or intent:// (those redirects only happen on
+  // www.facebook.com; mbasic IS the app-free web version by design).
+  static const _mbasicUA =
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 15_0 like Mac OS X) '
+      'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.0 Mobile/15E148 Safari/604.1';
+
   final Dio _dio;
 
   FacebookDownloaderService({Dio? dio})
@@ -154,7 +162,11 @@ class FacebookDownloaderService {
     //   3. Fetch the embed URL itself and look for <video> or JSON video data.
     String? realVideoUrl;
 
-    if (ogVideoUrl != null) {
+    // Only accept og:video as a real CDN video URL on confirmed video pages.
+    // Photo posts can have og:video pointing to a Facebook auto-generated slideshow
+    // MP4 — treating it as realVideoUrl would cause the first item to show as a
+    // video and skip all the actual post photos.
+    if (isVideoPage && ogVideoUrl != null) {
       final isRealCdn = ogVideoUrl.contains('fbcdn.net') &&
           !ogVideoUrl.contains('embed') &&
           !ogVideoUrl.contains('video.php');
@@ -163,8 +175,13 @@ class FacebookDownloaderService {
       }
     }
 
-    // Try JSON patterns in main page source
-    realVideoUrl ??= _extractVideoUrlFromJson(html);
+    // Only scan the bot UA HTML for video URLs on confirmed video pages.
+    // For photo posts the facebookexternalhit response can include og:video meta
+    // tags (auto-generated slideshows) that _extractVideoUrlFromJson would match,
+    // producing a false realVideoUrl that hides all the actual post photos.
+    if (isVideoPage) {
+      realVideoUrl ??= _extractVideoUrlFromJson(html);
+    }
 
     // ── Video embed URL strategy ────────────────────────────────────────
     // Facebook reels/videos never include og:video in bot UA responses — the
@@ -266,15 +283,14 @@ class FacebookDownloaderService {
       }
     }
 
-    // ── Early auth fetch ───────────────────────────────────────────────────
-    // (a) Video page but no MP4 URL found — auth HTML includes playable_url JSON
-    // (b) Non-video page with ≤1 image — may be a carousel; auth HTML has full album JSON
-    if (fbCookies != null &&
-        ((isVideoPage && realVideoUrl == null) ||
-            (!isVideoPage && allImages.length <= 1))) {
-      debugPrint(
-          '[FB] Auth fetch: needsVideo=${isVideoPage && realVideoUrl == null}, '
-          'needsCarousel=${!isVideoPage && allImages.length <= 1}');
+    // ── Auth fetch for video pages ─────────────────────────────────────────
+    // Only when on a confirmed video page and no MP4 URL found yet.
+    // Desktop auth HTML includes playable_url JSON for the actual video.
+    // NOT used for photo pages — desktop auth HTML is the full Facebook feed SPA
+    // (ads, recommendations, sidebar); any video URL found there would be a false
+    // positive from an unrelated post, not the shared photo album.
+    if (fbCookies != null && isVideoPage && realVideoUrl == null) {
+      debugPrint('[FB] Auth fetch for video (no URL found yet)');
       try {
         final earlyAuthDio = Dio(BaseOptions(
           connectTimeout: const Duration(seconds: 15),
@@ -301,63 +317,72 @@ class FacebookDownloaderService {
             finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
         final authResp = await earlyAuthDio.get<String>(resolvedUrl);
         if (authResp.statusCode == 200 && authResp.data != null) {
-          // Only extract a video URL for video pages.
-          // The desktop auth HTML contains the ENTIRE Facebook feed —
-          // recommendations, sidebar, ads — so any video URL found on a
-          // non-video page is a false positive from an unrelated video
-          // (e.g. a recommended reel in the sidebar), not the actual post.
-          if (isVideoPage && realVideoUrl == null) {
-            realVideoUrl = _extractVideoUrlFromJson(authResp.data!);
-          }
-          // Do NOT run _extractCarouselImagesFromJson on desktop auth HTML.
-          // The full SPA has hundreds of CDN image URLs from the entire feed
-          // (profile pictures, ads, recommendations) — scanning it for image
-          // URLs produces 200-300 false results that overwhelm the actual post
-          // images. Carousel images are extracted from mbasic below, which
-          // serves only the post content in plain server-rendered HTML.
-          debugPrint(
-              '[FB] Auth result: video=${realVideoUrl != null}');
+          realVideoUrl = _extractVideoUrlFromJson(authResp.data!);
+          debugPrint('[FB] Auth result: video=${realVideoUrl != null}');
         }
       } catch (e) {
         debugPrint('[FB] Auth fetch failed: $e');
       }
+    }
 
-      // mbasic.facebook.com fetch for multi-photo albums.
-      // mbasic is Facebook's server-rendered HTML for basic/text browsers —
-      // the entire post content (photos, caption, reactions) is in plain HTML
-      // with no JavaScript or feed content from other posts.
-      // Always run for non-video pages (regardless of how many images bot UA found)
-      // so we capture the full photo set, not just the OG cover image.
-      if (!isVideoPage) {
-        try {
-          final parsed = Uri.tryParse(finalUrl);
-          // Include query params — /photo?fbid=...&set=pcb.xxx needs fbid and set
-          // to load the correct album; dropping them lands on the wrong page.
-          String mbasicUrl;
-          if (parsed != null) {
+    // ── mbasic fetch for photo albums / carousels ──────────────────────────
+    // Always try mbasic for non-video pages — it provides server-rendered HTML
+    // with only the post content (no feed, ads, or recommendations).
+    //
+    // Auth cookies are passed when available (so friends-only posts work too)
+    // but are NOT required — public posts are accessible without them.
+    //
+    // _mbasicUA (iOS Safari): mbasic.facebook.com serves basic HTML to mobile
+    // UAs. App redirects (fb:// / intent://) only happen on www.facebook.com;
+    // mbasic IS the app-free web version and never redirects to the native app.
+    if (!isVideoPage) {
+      try {
+        // Build mbasic URL. For photo pages keep fbid/set (identify the album);
+        // for all other pages use just the path — tracking params (rdid,
+        // share_url, wtsid) can trigger unexpected redirects on mbasic.
+        final parsed = Uri.tryParse(finalUrl);
+        String mbasicUrl;
+        if (parsed != null) {
+          if (parsed.path.contains('/photo')) {
+            const essential = {'fbid', 'set', 'id'};
+            final qs = parsed.queryParametersAll.entries
+                .where((e) => essential.contains(e.key))
+                .expand((e) => e.value
+                    .map((v) => '${e.key}=${Uri.encodeQueryComponent(v)}'))
+                .join('&');
             mbasicUrl = 'https://mbasic.facebook.com${parsed.path}'
-                '${parsed.query.isNotEmpty ? '?${parsed.query}' : ''}';
+                '${qs.isNotEmpty ? '?$qs' : ''}';
           } else {
-            mbasicUrl = finalUrl.replaceFirst(
-                'https://www.facebook.com', 'https://mbasic.facebook.com');
+            mbasicUrl = 'https://mbasic.facebook.com${parsed.path}';
           }
-          debugPrint('[FB] mbasic carousel: $mbasicUrl');
-          final mbasicDio = Dio(BaseOptions(
-            connectTimeout: const Duration(seconds: 15),
-            receiveTimeout: const Duration(seconds: 30),
-            followRedirects: true,
-            maxRedirects: 8,
-            headers: {
-              // Desktop UA — avoids fb:// / intent:// redirects on mbasic too.
-              'User-Agent': _authUA,
-              'Cookie': fbCookies,
-              'Referer': 'https://mbasic.facebook.com/',
-              'Accept':
-                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            },
-          ));
-          final mbasicResp = await mbasicDio.get<String>(mbasicUrl);
-          if (mbasicResp.statusCode == 200 && mbasicResp.data != null) {
+        } else {
+          mbasicUrl = finalUrl.replaceFirst(
+              'https://www.facebook.com', 'https://mbasic.facebook.com');
+        }
+        debugPrint('[FB] mbasic carousel: $mbasicUrl');
+        final mbasicHeaders = <String, String>{
+          'User-Agent': _mbasicUA,
+          'Referer': 'https://mbasic.facebook.com/',
+          'Accept':
+              'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        };
+        if (fbCookies != null) mbasicHeaders['Cookie'] = fbCookies;
+        final mbasicDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 30),
+          followRedirects: true,
+          maxRedirects: 8,
+          headers: mbasicHeaders,
+        ));
+        final mbasicResp = await mbasicDio.get<String>(mbasicUrl);
+        if (mbasicResp.statusCode == 200 && mbasicResp.data != null) {
+          // Bail out if mbasic redirected us away (e.g. desktop UA on mbasic
+          // can cause a redirect to www.facebook.com). The React SPA HTML would
+          // poison allImages with hundreds of unrelated CDN image URLs.
+          final respHost = mbasicResp.realUri?.host ?? '';
+          if (!respHost.contains('mbasic.facebook.com')) {
+            debugPrint('[FB] mbasic redirected to $respHost — skipping');
+          } else {
             final mbasicHtml = mbasicResp.data!;
 
             // Phase 1 — Photo-link-anchored extraction.
@@ -375,7 +400,8 @@ class FacebookDownloaderService {
             );
             for (final anchor in photoAnchorRe.allMatches(mbasicHtml)) {
               // Scan the 600 chars after each photo link for the <img src>.
-              final end = (anchor.end + 600).clamp(anchor.end, mbasicHtml.length);
+              final end =
+                  (anchor.end + 600).clamp(anchor.end, mbasicHtml.length);
               final slice = mbasicHtml.substring(anchor.end, end);
               final img = imgRe.firstMatch(slice);
               if (img != null) {
@@ -390,12 +416,12 @@ class FacebookDownloaderService {
               }
             }
 
-            // Phase 2 — Broad scan fallback (only if no photo links found).
-            // Some post types (text + single photo, or restricted albums) may not
-            // render /photo.php anchor links on mbasic. Fall back to scanning all
-            // CDN <img> tags on the page, which are typically just the post photo(s)
-            // plus a small profile thumbnail (filtered out below).
-            if (allImages.isEmpty) {
+            // Phase 2 — Broad scan fallback (only when ≤1 image found so far).
+            // Triggered when photo-link-anchored extraction finds nothing (e.g.
+            // text posts with a single photo, or mbasic page has a non-standard
+            // photo link format). With ≤1 image (the og:image is already in the
+            // list), scanning mbasic CDN images adds the actual post photo(s).
+            if (allImages.length <= 1) {
               for (final m in imgRe.allMatches(mbasicHtml)) {
                 final imgUrl = _unescape(m.group(1)!);
                 if (!imgUrl.contains('/profile') &&
@@ -410,9 +436,9 @@ class FacebookDownloaderService {
 
             debugPrint('[FB] mbasic: ${allImages.length} images total');
           }
-        } catch (e) {
-          debugPrint('[FB] mbasic fetch failed: $e');
         }
+      } catch (e) {
+        debugPrint('[FB] mbasic fetch failed: $e');
       }
     }
 
