@@ -164,7 +164,10 @@ class FacebookDownloaderService {
     // ID from the resolved og:url or final URL and fetch the embed page.
     // Also try the Facebook video plugin URL for posts without a direct video ID.
     if (realVideoUrl == null && isVideoPage) {
-      final videoId = _extractVideoIdFromUrl(ogUrl ?? finalUrl);
+      // Prefer finalUrl (resolved URL, clean numeric IDs).
+      // ogUrl may use pfbid or contain a Chinese title before the numeric ID.
+      final videoId = _extractVideoIdFromUrl(finalUrl) ??
+          (ogUrl != null ? _extractVideoIdFromUrl(ogUrl) : null);
       if (videoId != null) {
         try {
           final embedUrl =
@@ -405,6 +408,7 @@ class FacebookDownloaderService {
   /// cover Videos, Reels, and Watch posts.
   String? _extractVideoUrlFromJson(String html) {
     final patterns = [
+      // Classic field names (web player, embed pages)
       RegExp(r'"browser_native_hd_url"\s*:\s*"([^"]+)"'),
       RegExp(r'"browser_native_sd_url"\s*:\s*"([^"]+)"'),
       RegExp(r'"playable_url_quality_hd"\s*:\s*"([^"]+)"'),
@@ -412,6 +416,12 @@ class FacebookDownloaderService {
       RegExp(r'"hd_src"\s*:\s*"([^"]+)"'),
       RegExp(r'"sd_src"\s*:\s*"([^"]+)"'),
       RegExp(r'"video_url"\s*:\s*"([^"]+)"'),
+      // Newer React SPA field names
+      RegExp(r'"progressive_url"\s*:\s*"([^"]+)"'),
+      RegExp(r'"video_full_url"\s*:\s*"([^"]+)"'),
+      RegExp(r'"videoSrc"\s*:\s*"([^"]+)"'),
+      // CDN URL patterns (catch-all for fbcdn video assets)
+      RegExp(r'"(https://[^"]*\.fbcdn\.net[^"]*/[^"]*/[^"]*\.mp4[^"]*)"'),
       RegExp(r'"src"\s*:\s*"(https://[^"]*fbcdn\.net[^"]*\.mp4[^"]*)"'),
     ];
 
@@ -470,14 +480,27 @@ class FacebookDownloaderService {
   }
 
   /// Extracts a numeric video/reel ID from a Facebook URL.
-  /// Matches /reel/<id>/, /videos/<id>/, and /posts/<id>/ path segments.
-  /// Posts can also be video posts; the post ID is often the video ID.
+  /// Handles three URL shapes:
+  ///   /reel/<id>/                   → direct match
+  ///   /videos/<id>/                 → direct match
+  ///   /videos/中文標題/<id>/          → title-aware fallback
+  ///   /posts/<id>/                  → direct match
   static String? _extractVideoIdFromUrl(String url) {
-    final re = RegExp(
-      r'/(?:reel|videos|video|posts)/(\d+)',
+    final path = url.split('?').first;
+
+    // Primary: numeric ID immediately after a video-type keyword
+    final direct = RegExp(
+      r'/(?:reel|videos|video|posts)/(\d{10,})',
       caseSensitive: false,
-    );
-    return re.firstMatch(url)?.group(1);
+    ).firstMatch(path);
+    if (direct != null) return direct.group(1);
+
+    // Fallback: keyword, then any path segments (e.g. title), then a long numeric ID
+    final withTitle = RegExp(
+      r'/(?:reel|videos|video|posts)/[^?]+?/+(\d{10,})(?:/|$)',
+      caseSensitive: false,
+    ).firstMatch(path);
+    return withTitle?.group(1);
   }
 
   /// Extracts a video URL from a `<video src="...">` tag in embed page HTML.
@@ -489,6 +512,12 @@ class FacebookDownloaderService {
     return url.startsWith('https://') ? url : null;
   }
 
-  String _unescape(String s) =>
-      s.replaceAll(r'\/', '/').replaceAll(r'\u0026', '&');
+  String _unescape(String s) {
+    // Decode all \uXXXX sequences (covers \u0026 → &, \u003F → ?, etc.)
+    var result = s.replaceAllMapped(
+      RegExp(r'\\u([0-9a-fA-F]{4})'),
+      (m) => String.fromCharCode(int.parse(m.group(1)!, radix: 16)),
+    );
+    return result.replaceAll(r'\/', '/');
+  }
 }
