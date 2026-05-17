@@ -158,7 +158,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.34',
+                    'v1.0.0.35',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -224,6 +224,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             onSubmit: _openSelection,
             onPaste: _pasteFromClipboard,
           ),
+
+          // ── Logged-in accounts status bar ────────────────────────────────
+          if (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
+            _AccountStatusBar(
+              igLoggedIn: _igLoggedIn,
+              xLoggedIn: _xLoggedIn,
+              fbLoggedIn: _fbLoggedIn,
+              igUsername: _igUsername,
+              xUsername: _xUsername,
+              fbUsername: _fbUsername,
+              onTap: () => _showAccountsSheet(context),
+            ),
 
           // ── Share hint ───────────────────────────────────────────────────
           if (jobs.isEmpty) const _EmptyHint(),
@@ -350,6 +362,85 @@ class _EmptyHint extends StatelessWidget {
         ),
       ),
     ));
+  }
+}
+
+// ── Logged-in account status bar ────────────────────────────────────────────
+
+class _AccountStatusBar extends StatelessWidget {
+  const _AccountStatusBar({
+    required this.igLoggedIn,
+    required this.xLoggedIn,
+    required this.fbLoggedIn,
+    this.igUsername,
+    this.xUsername,
+    this.fbUsername,
+    required this.onTap,
+  });
+
+  final bool igLoggedIn;
+  final bool xLoggedIn;
+  final bool fbLoggedIn;
+  final String? igUsername;
+  final String? xUsername;
+  final String? fbUsername;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    final chips = <Widget>[];
+    void addChip(IconData icon, bool loggedIn, String? username, String fallback) {
+      if (!loggedIn) return;
+      chips.add(Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 13, color: cs.primary),
+            const SizedBox(width: 3),
+            Text(
+              username != null ? '@$username' : fallback,
+              style: Theme.of(context)
+                  .textTheme
+                  .labelSmall
+                  ?.copyWith(color: cs.primary, fontWeight: FontWeight.w600),
+            ),
+          ],
+        ),
+      ));
+    }
+
+    addChip(Icons.camera_alt_outlined, igLoggedIn, igUsername, 'Instagram');
+    addChip(Icons.close, xLoggedIn, xUsername, 'X');
+    addChip(Icons.facebook_rounded, fbLoggedIn, fbUsername, 'Facebook');
+
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+        decoration: BoxDecoration(
+          color: cs.primary.withValues(alpha: 0.06),
+          border: Border(
+            bottom: BorderSide(
+              color: cs.outlineVariant.withValues(alpha: 0.5),
+              width: 0.5,
+            ),
+          ),
+        ),
+        child: Row(
+          children: [
+            Icon(Icons.account_circle_outlined, size: 13, color: cs.primary),
+            const SizedBox(width: 6),
+            ...chips,
+            const Spacer(),
+            Icon(Icons.chevron_right, size: 14, color: cs.primary.withValues(alpha: 0.6)),
+          ],
+        ),
+      ),
+    );
   }
 }
 
