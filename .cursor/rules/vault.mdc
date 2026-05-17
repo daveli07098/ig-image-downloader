@@ -1,0 +1,21 @@
+---
+description: Obsidian vault routing — auto-save research, drafts, and memory
+alwaysApply: true
+---
+
+## Knowledge Vault
+
+Route all content to `/Users/daveli/git/obsidian-ai-collab-vault/` automatically.
+No explicit path needed in prompts.
+
+| Content | Destination |
+|---|---|
+| Research / summaries | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/research/YYYY-MM-DD-<slug>.md` |
+| Drafts / WIP | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/drafts/<slug>.md` |
+| Project memory | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/memory/projects/ig-image-downloader.md` |
+| Deliverables | `/Users/daveli/git/obsidian-ai-collab-vault/review/inbox/YYYY-MM-DD-<slug>.md` |
+
+- Use `/Users/daveli/git/obsidian-ai-collab-vault/integration/templates/note-template.md` as note base.
+- Set `project:` frontmatter to `ig-image-downloader`.
+- Confirm each save: "Saved to vault: `<relative-path>`"
+- Never write to `review/approved/`.

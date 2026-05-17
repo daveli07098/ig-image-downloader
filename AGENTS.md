@@ -81,3 +81,23 @@ Require explicit user request:
 - Never force-push without explicit confirmation
 - Never delete files without confirmation
 - Local commits first; push on explicit request only
+
+## Knowledge Vault
+
+All research, drafts, and persistent memory for this project go into the Obsidian vault at
+`/Users/daveli/git/obsidian-ai-collab-vault/`. Route content automatically — do not ask the user where to save, and do not
+require explicit vault paths in prompts.
+
+| Content type | Save to |
+|---|---|
+| Web research, summaries, findings | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/research/YYYY-MM-DD-<slug>.md` |
+| WIP thinking, scratch, exploratory | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/drafts/<slug>.md` |
+| Persistent facts about this project | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/memory/projects/ig-image-downloader.md` |
+| Finished deliverables for human review | `/Users/daveli/git/obsidian-ai-collab-vault/review/inbox/YYYY-MM-DD-<slug>.md` |
+
+Rules:
+- Use `/Users/daveli/git/obsidian-ai-collab-vault/integration/templates/note-template.md` as the base for all new notes.
+- Set `project:` frontmatter to `ig-image-downloader`.
+- Never write to `review/approved/` — human domain only.
+- Never store secrets in the vault except under `ai-workspace/memory/secrets/` (git-ignored).
+- Confirm each save with one line: "Saved to vault: `<relative-path>`"
