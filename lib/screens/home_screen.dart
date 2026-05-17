@@ -78,8 +78,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
       if (sessionId == null) return null;
-      // Load the home page — IG SSR embeds viewer.username in __NEXT_DATA__.
-      // A plain GET with only sessionid works; csrftoken only needed for mutations.
       final dio = Dio(BaseOptions(
         connectTimeout: const Duration(seconds: 15),
         receiveTimeout: const Duration(seconds: 15),
@@ -90,22 +88,52 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           'Accept-Language': 'en-US,en;q=0.9',
         },
       ));
-      final resp = await dio.get<String>('https://www.instagram.com/');
-      final finalPath = resp.realUri.path;
-      if (finalPath.contains('/accounts/login') || finalPath.contains('/challenge')) {
-        return null;
-      }
-      final html = resp.data ?? '';
-      // Extract __NEXT_DATA__ JSON and navigate props.pageProps.viewer.username
-      final scriptMatch =
-          RegExp(r'<script id="__NEXT_DATA__"[^>]*>({.+?})</script>', dotAll: true)
-              .firstMatch(html);
-      if (scriptMatch != null) {
-        try {
-          final data = jsonDecode(scriptMatch.group(1)!) as Map<String, dynamic>;
-          final viewer = (data['props'] as Map?)?['pageProps']?['viewer'];
-          if (viewer is Map) return viewer['username'] as String?;
-        } catch (_) {}
+      // Try home page then accounts/edit in case one has __NEXT_DATA__ with viewer
+      for (final url in [
+        'https://www.instagram.com/',
+        'https://www.instagram.com/accounts/edit/',
+      ]) {
+        final resp = await dio.get<String>(url);
+        final finalPath = resp.realUri.path;
+        if (finalPath.contains('/accounts/login') || finalPath.contains('/challenge')) {
+          debugPrint('[Home] IG resolve: redirected to $finalPath, bailing');
+          return null;
+        }
+        final html = resp.data ?? '';
+        debugPrint('[Home] IG resolve: $url ${html.length} bytes, '
+            '__NEXT_DATA__: ${html.contains("__NEXT_DATA__")}');
+        final sm = RegExp(
+                r'<script id="__NEXT_DATA__"[^>]*>({.+?})</script>',
+                dotAll: true)
+            .firstMatch(html);
+        if (sm != null) {
+          try {
+            final data = jsonDecode(sm.group(1)!) as Map<String, dynamic>;
+            final pProps =
+                (data['props'] as Map?)?['pageProps'] as Map? ?? {};
+            // Try several known viewer-key names
+            for (final key in ['viewer', 'user', 'currentUser', 'loggedInUser']) {
+              final obj = pProps[key];
+              if (obj is Map && obj['username'] is String) {
+                return obj['username'] as String;
+              }
+            }
+            // Also try data.viewer (GraphQL-style pages)
+            final gql = (data['data'] as Map?)?['viewer'];
+            if (gql is Map && gql['username'] is String) {
+              return gql['username'] as String;
+            }
+            debugPrint('[Home] IG resolve: __NEXT_DATA__ parsed, '
+                'pageProps keys: ${pProps.keys.take(10).toList()}');
+          } catch (e) {
+            debugPrint('[Home] IG resolve: JSON parse error: $e');
+          }
+        }
+        // Broad fallback: first "username":"<value>" near "viewer" in HTML
+        final m = RegExp(
+                r'"viewer"[^{]{0,40}"username"\s*:\s*"([a-zA-Z0-9._]{2,30})"')
+            .firstMatch(html);
+        if (m != null) return m.group(1);
       }
       return null;
     } catch (e) {
@@ -118,8 +146,6 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final authToken = await SessionService.getSessionId(LoginPlatform.x);
       if (authToken == null) return null;
-      // ct0 (CSRF token) lives in the WebView CookieManager — still present
-      // after login even without re-launching the WebView.
       final raw = await _cookieChannel.invokeMethod<String>(
           'getCookie', {'url': 'https://x.com'});
       String? ct0;
@@ -132,26 +158,65 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           }
         }
       }
+      debugPrint('[Home] X resolve: ct0 present=${ct0 != null}');
       if (ct0 == null) return null;
-      final dio = Dio(BaseOptions(
+
+      final apiHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Cookie': 'auth_token=$authToken; ct0=$ct0',
+        'x-csrf-token': ct0,
+        'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs'
+            '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+      };
+      final apiDio = Dio(BaseOptions(
         connectTimeout: const Duration(seconds: 10),
         receiveTimeout: const Duration(seconds: 10),
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-              'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Cookie': 'auth_token=$authToken; ct0=$ct0',
-          'x-csrf-token': ct0,
-          'Authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs'
-              '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-        },
+        headers: apiHeaders,
       ));
-      // api.twitter.com is the legacy v1.1 host — still serves verify_credentials
-      // whereas api.x.com and x.com/i/api both return 404 for this endpoint.
-      final resp = await dio.get<Map<String, dynamic>>(
+
+      // Try settings.json (returns screen_name; fewer deprecation issues than
+      // verify_credentials which now 404s on all known X/Twitter API hosts)
+      for (final endpoint in [
+        'https://api.twitter.com/1.1/account/settings.json',
         'https://api.twitter.com/1.1/account/verify_credentials.json',
-        queryParameters: {'include_entities': 'false', 'skip_status': 'true'},
-      );
-      return resp.data?['screen_name'] as String?;
+      ]) {
+        try {
+          final r = await apiDio.get<Map<String, dynamic>>(endpoint,
+              queryParameters: {'include_entities': 'false', 'skip_status': 'true'});
+          final name = r.data?['screen_name'] as String?;
+          debugPrint('[Home] X resolve: $endpoint → $name');
+          if (name != null) return name;
+        } catch (e) {
+          debugPrint('[Home] X resolve: $endpoint failed: $e');
+        }
+      }
+
+      // Last resort: fetch x.com/home HTML and scan for screen_name
+      try {
+        final htmlDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 15),
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 '
+                '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+            'Cookie': 'auth_token=$authToken; ct0=$ct0',
+            'Accept-Language': 'en-US,en;q=0.9',
+          },
+        ));
+        final resp = await htmlDio.get<String>('https://x.com/home');
+        final path = resp.realUri.path;
+        final html = resp.data ?? '';
+        debugPrint('[Home] X resolve: home page $path ${html.length} bytes');
+        if (!path.contains('/login') && !path.contains('/i/flow')) {
+          final m =
+              RegExp(r'"screen_name"\s*:\s*"([A-Za-z0-9_]{1,50})"').firstMatch(html);
+          if (m != null) return m.group(1);
+        }
+      } catch (e) {
+        debugPrint('[Home] X resolve: home page failed: $e');
+      }
+      return null;
     } catch (e) {
       debugPrint('[Home] X username resolve: $e');
       return null;
@@ -297,7 +362,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.39',
+                    'v1.0.0.40',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
