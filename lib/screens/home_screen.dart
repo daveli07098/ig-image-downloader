@@ -77,18 +77,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
       if (sessionId == null) return null;
+      // Use mobile endpoint (i.instagram.com) — only needs sessionid, no
+      // browser-context cookies, and returns JSON errors instead of redirects.
       final dio = Dio(BaseOptions(
         connectTimeout: const Duration(seconds: 10),
         receiveTimeout: const Duration(seconds: 10),
+        followRedirects: false,
         headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) '
-              'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'User-Agent':
+              'Instagram 269.0.0.18.75 Android (33/13; 420dpi; 1080x2400; '
+              'Google/google; Pixel 6; oriole; arm64-v8a; en_US; 437097976)',
           'Cookie': 'sessionid=$sessionId',
-          'x-ig-app-id': '936619743392459',
+          'X-IG-App-ID': '567067343352427',
         },
       ));
       final resp = await dio.get<Map<String, dynamic>>(
-        'https://www.instagram.com/api/v1/accounts/current_user/',
+        'https://i.instagram.com/api/v1/accounts/current_user/',
         queryParameters: {'edit': 'true'},
       );
       final user = resp.data?['user'] as Map<String, dynamic>?;
@@ -130,8 +134,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
         },
       ));
+      // X web-app internal path — api.x.com/1.1 returns 404 for web clients.
       final resp = await dio.get<Map<String, dynamic>>(
-        'https://api.x.com/1.1/account/verify_credentials.json',
+        'https://x.com/i/api/1.1/account/verify_credentials.json',
         queryParameters: {'include_entities': 'false', 'skip_status': 'true'},
       );
       return resp.data?['screen_name'] as String?;
@@ -280,7 +285,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.37',
+                    'v1.0.0.38',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
