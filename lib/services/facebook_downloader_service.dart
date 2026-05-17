@@ -283,7 +283,12 @@ class FacebookDownloaderService {
             'sec-fetch-site': 'same-origin',
           },
         ));
-        final authResp = await earlyAuthDio.get<String>(cleanUrl);
+        // Use the redirect-resolved URL — share URLs (/share/...) may redirect
+        // to a different canonical URL depending on UA; using the already-resolved
+        // final URL avoids an extra redirect hop and gives more reliable HTML.
+        final resolvedUrl =
+            finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
+        final authResp = await earlyAuthDio.get<String>(resolvedUrl);
         if (authResp.statusCode == 200 && authResp.data != null) {
           if (realVideoUrl == null) {
             realVideoUrl = _extractVideoUrlFromJson(authResp.data!);
@@ -294,6 +299,65 @@ class FacebookDownloaderService {
         }
       } catch (e) {
         debugPrint('[FB] Auth fetch failed: $e');
+      }
+
+      // mbasic.facebook.com fallback for multi-photo albums.
+      // mbasic is Facebook's server-rendered HTML for basic devices — it outputs
+      // all album photos as plain <img> tags with no JavaScript. Works reliably
+      // for extracting carousel images that the SPA version hides behind GraphQL.
+      if (!isVideoPage && allImages.length <= 1) {
+        try {
+          final parsed = Uri.tryParse(finalUrl);
+          final mbasicUrl = parsed != null
+              ? 'https://mbasic.facebook.com${parsed.path}'
+              : finalUrl
+                  .replaceFirst('https://www.facebook.com',
+                      'https://mbasic.facebook.com')
+                  .split('?')
+                  .first;
+          debugPrint('[FB] Trying mbasic for carousel: $mbasicUrl');
+          final mbasicDio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+            followRedirects: true,
+            maxRedirects: 8,
+            headers: {
+              // Minimal mobile UA — mbasic is designed for simple browsers.
+              'User-Agent':
+                  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
+                  'AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 '
+                  'Mobile/15E148 Safari/604.1',
+              'Cookie': fbCookies,
+              'Referer': 'https://mbasic.facebook.com/',
+              'Accept':
+                  'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            },
+          ));
+          final mbasicResp = await mbasicDio.get<String>(mbasicUrl);
+          if (mbasicResp.statusCode == 200 && mbasicResp.data != null) {
+            final mbasicHtml = mbasicResp.data!;
+            // mbasic renders each album photo in an <img src="..."> tag.
+            final imgRe = RegExp(
+              r'<img[^>]+src="(https://[^"]*(?:scontent|fbcdn)[^"]*\.(?:jpg|jpeg|png|webp)[^"]*)"',
+              caseSensitive: false,
+            );
+            for (final m in imgRe.allMatches(mbasicHtml)) {
+              final imgUrl = _unescape(m.group(1)!);
+              if (!imgUrl.contains('/profile') &&
+                  !imgUrl.contains('/rsrc') &&
+                  !imgUrl.contains('/emoji') &&
+                  !imgUrl.contains('static.xx.fbcdn') &&
+                  !allImages.contains(imgUrl)) {
+                allImages.add(imgUrl);
+              }
+            }
+            // Also run JSON extraction in case mbasic embeds serialized state.
+            _extractCarouselImagesFromJson(mbasicHtml, allImages);
+            debugPrint('[FB] mbasic carousel: ${allImages.length} images total');
+          }
+        } catch (e) {
+          debugPrint('[FB] mbasic carousel fetch failed: $e');
+        }
       }
     }
 

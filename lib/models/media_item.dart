@@ -23,10 +23,25 @@ class MediaItem {
 
   bool get isVideo => type == MediaItemType.video;
 
-  /// Filename base: eyes198877_20260504_1  (no extension)
+  /// Filename base: eyes198877_20260504_1_a3b2c1  (no extension)
+  ///
+  /// The 6-char hex suffix is a stable hash of the media URL path (no query
+  /// params). It prevents filename collisions between different posts that share
+  /// the same username, date, and item index — e.g. two different Facebook posts
+  /// downloaded on the same day both produce `facebook_reel_20260518_1` without
+  /// this suffix, causing the second download to be silently skipped and the
+  /// user to be shown the wrong file.
   String get filenameBase {
     final dateStr = _formatDate(postTimestamp);
-    return '${username}_${dateStr}_$itemIndex';
+    // Stable polynomial hash of the URL path — same URL always produces same
+    // hash across app restarts, different URLs produce different hashes.
+    final path = mediaUrl.split('?').first;
+    var h = 0;
+    for (final c in path.codeUnits) {
+      h = ((h * 31) + c) & 0xFFFFFF;
+    }
+    final hash = h.toRadixString(16).padLeft(6, '0');
+    return '${username}_${dateStr}_${itemIndex}_$hash';
   }
 
   Map<String, dynamic> toJson() => {
