@@ -437,47 +437,54 @@ class ThreadsDownloaderService {
       'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; '
       'OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)';
 
+  // Instagram web app-id (used for www.instagram.com API)
   static const _igAppId = '936619743392459';
+  // Threads web app-id (used by threads.com itself for its own API calls)
+  static const _threadsAppId = '238260118697367';
 
   /// Calls the media info API using available sessions.
   /// Order of attempts:
-  ///   1. i.instagram.com with mobile UA + x-ig-app-id + IG sessionid
+  ///   1. i.instagram.com with mobile UA + x-ig-app-id (IG web) + IG sessionid
+  ///   2. i.instagram.com with mobile UA + x-ig-app-id (Threads) + IG sessionid
   ///      (what the Threads mobile app actually calls)
-  ///   2. threads.com with desktop UA + threads.com sessionid
+  ///   3. threads.com with desktop UA + threads.com sessionid
   ///      (requires threads session captured after IG login)
-  ///   3. threads.com with desktop UA + IG sessionid (last resort)
+  ///   4. threads.com with desktop UA + IG sessionid (last resort)
   Future<List<MediaItem>> _fetchFromApi(String mediaId,
       {String? igSessionId, String? threadsSessionId}) async {
-    // Attempt 1: Instagram mobile API (same as what the Threads app uses)
+    // Attempts 1 & 2: Instagram mobile API with both app IDs
     if (igSessionId != null) {
-      try {
-        final apiDio = Dio(BaseOptions(
-          connectTimeout: const Duration(seconds: 15),
-          receiveTimeout: const Duration(seconds: 30),
-          followRedirects: false, // 302 = not authed, don't follow to HTML login
-          headers: {
-            'User-Agent': _mobileUA,
-            'Cookie': 'sessionid=$igSessionId',
-            'x-ig-app-id': _igAppId,
-            'Accept': 'application/json',
-          },
-        ));
-        final resp = await apiDio.get<Map<String, dynamic>>(
-          'https://i.instagram.com/api/v1/media/$mediaId/info/',
-        );
-        if (resp.statusCode == 200 && resp.data != null) {
-          final items = _parseApiResponse(resp.data!);
-          if (items.isNotEmpty) {
-            debugPrint('[Threads] i.instagram.com API: ${items.length} items');
-            return items;
+      for (final appId in [_igAppId, _threadsAppId]) {
+        try {
+          final apiDio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+            followRedirects: true,
+            maxRedirects: 3,
+            headers: {
+              'User-Agent': _mobileUA,
+              'Cookie': 'sessionid=$igSessionId',
+              'x-ig-app-id': appId,
+              'Accept': 'application/json',
+            },
+          ));
+          final resp = await apiDio.get<Map<String, dynamic>>(
+            'https://i.instagram.com/api/v1/media/$mediaId/info/',
+          );
+          if (resp.statusCode == 200 && resp.data != null) {
+            final items = _parseApiResponse(resp.data!);
+            if (items.isNotEmpty) {
+              debugPrint('[Threads] i.instagram.com API (app-id $appId): ${items.length} items');
+              return items;
+            }
           }
+        } on DioException catch (e) {
+          debugPrint('[Threads] i.instagram.com (app-id $appId) failed: ${e.response?.statusCode} ${e.message}');
         }
-      } on DioException catch (e) {
-        debugPrint('[Threads] i.instagram.com API failed: ${e.response?.statusCode} ${e.message}');
       }
     }
 
-    // Attempt 2: threads.com API with threads-domain session
+    // Attempt 3: threads.com API with threads-domain session
     final threadsSession = threadsSessionId;
     if (threadsSession != null) {
       try {
@@ -491,7 +498,7 @@ class ThreadsDownloaderService {
       }
     }
 
-    // Attempt 3: threads.com API with IG session (may work if sessions are shared)
+    // Attempt 4: threads.com API with IG session (may work if sessions are shared)
     if (igSessionId != null) {
       try {
         final items = await _callThreadsApi(mediaId, igSessionId);

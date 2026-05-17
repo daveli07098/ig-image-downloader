@@ -2,6 +2,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../services/dev_logger.dart';
 
+// Active in kDebugMode, OR when built with `--dart-define=DEV_MODE=true`.
+const _devMode = bool.fromEnvironment('DEV_MODE', defaultValue: kDebugMode);
+
 /// Debug-only floating log overlay.
 ///
 /// Wraps the app content with a semi-transparent slide-up panel that shows all
@@ -64,7 +67,7 @@ class _DevLogOverlayState extends State<DevLogOverlay> {
 
   @override
   Widget build(BuildContext context) {
-    if (!kDebugMode) return widget.child;
+    if (!_devMode) return widget.child;
 
     return LayoutBuilder(
       builder: (context, constraints) {
