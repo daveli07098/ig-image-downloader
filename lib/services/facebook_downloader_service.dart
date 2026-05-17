@@ -298,7 +298,7 @@ class FacebookDownloaderService {
         // back-to-back requests with millisecond precision, which is a reliable
         // signal for automation detection systems.
         await Future.delayed(
-            Duration(milliseconds: 100 + Random().nextInt(200)));
+            Duration(milliseconds: 500 + Random().nextInt(1500)));
         final earlyAuthDio = Dio(BaseOptions(
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
@@ -507,7 +507,7 @@ class FacebookDownloaderService {
       debugPrint('[FB] Bot UA found nothing; retrying with auth browser UA...');
       try {
         await Future.delayed(
-            Duration(milliseconds: 150 + Random().nextInt(200)));
+            Duration(milliseconds: 500 + Random().nextInt(1500)));
         final authDio = Dio(BaseOptions(
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
