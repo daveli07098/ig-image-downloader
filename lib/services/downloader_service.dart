@@ -73,10 +73,13 @@ class DownloaderService {
       return XDownloaderService().fetchItems(url);
     }
     if (ThreadsDownloaderService.isThreadsUrl(url)) {
-      // Threads shares Instagram's auth backend — reuse the IG session cookie
+      // Pass both sessions: IG session for i.instagram.com API (Threads app approach),
+      // and threads.com session (captured after IG login) for the threads.com API.
       final igSessionId =
           await SessionService.getSessionId(LoginPlatform.instagram);
-      return ThreadsDownloaderService().fetchItems(url, igSessionId: igSessionId);
+      final threadsSessionId = await SessionService.getThreadsSessionId();
+      return ThreadsDownloaderService().fetchItems(url,
+          igSessionId: igSessionId, threadsSessionId: threadsSessionId);
     }
     if (FacebookDownloaderService.isFacebookUrl(url)) {
       final fbCookies =

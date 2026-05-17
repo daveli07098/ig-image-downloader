@@ -64,26 +64,30 @@ class ThreadsDownloaderService {
 
   // ── Fetch ────────────────────────────────────────────────────────────────
 
-  /// [igSessionId] — the Instagram `sessionid` cookie value.
-  /// Threads shares Instagram's auth backend, so the same session token works
-  /// on threads.com. As of 2025, Threads requires authentication for ALL
-  /// content — even public posts — via their REST API.
+  /// [igSessionId] — the Instagram `sessionid` cookie value (from instagram.com).
+  /// [threadsSessionId] — the `sessionid` cookie captured from threads.com after IG
+  /// login (different domain). Used directly for the threads.com REST API.
+  /// As of 2025, Threads requires authentication for ALL content via their REST API.
   Future<List<MediaItem>> fetchItems(String url,
-      {String? igSessionId}) async {
+      {String? igSessionId, String? threadsSessionId}) async {
     final cleanUrl = url.split('?').first;
     debugPrint('[Threads] URL: $cleanUrl  session: ${igSessionId != null ? 'YES' : 'NO'}');
     final username = extractUsername(cleanUrl) ?? 'threads';
 
-    // ── Strategy 0: Threads REST API (primary, requires IG session) ───────
-    // Threads removed unauthenticated access in 2025. The REST API at
-    // threads.com/api/v1/media/<id>/info/ is the only reliable strategy.
-    // It uses the same sessionid cookie as instagram.com.
-    if (igSessionId != null) {
+    // ── Strategy 0: Threads REST API (primary, requires session) ────────────
+    // Threads removed unauthenticated access in 2025. We try two endpoints:
+    //   A. i.instagram.com/api/v1/media/<id>/info/ — mobile app endpoint that
+    //      accepts the IG sessionid + x-ig-app-id. The Threads app uses this.
+    //   B. threads.com/api/v1/media/<id>/info/ — web endpoint that needs the
+    //      threads.com domain sessionid (captured after IG login).
+    final anySession = igSessionId ?? threadsSessionId;
+    if (anySession != null) {
       final shortcode = _extractShortcode(cleanUrl);
       final postId = shortcode != null ? _shortcodeToId(shortcode) : null;
       if (postId != null) {
         try {
-          final apiItems = await _fetchFromApi(postId, igSessionId);
+          final apiItems = await _fetchFromApi(
+              postId, igSessionId: igSessionId, threadsSessionId: threadsSessionId);
           if (apiItems.isNotEmpty) {
             debugPrint('[Threads] API: ${apiItems.length} items');
             return apiItems;
@@ -94,10 +98,11 @@ class ThreadsDownloaderService {
       }
     }
 
-    // Inject the Instagram session cookie into both Dio instances for the
+    // Inject the best available session cookie into both Dio instances for the
     // HTML scraping strategies below (may help in edge cases).
-    if (igSessionId != null) {
-      final cookieHeader = 'sessionid=$igSessionId';
+    final bestSession = threadsSessionId ?? igSessionId;
+    if (bestSession != null) {
+      final cookieHeader = 'sessionid=$bestSession';
       _desktopDio.options.headers['Cookie'] = cookieHeader;
       _botDio.options.headers['Cookie'] = cookieHeader;
     }
@@ -427,15 +432,86 @@ class ThreadsDownloaderService {
     return n.toString();
   }
 
-  /// Calls the Threads REST API to fetch media info for a post.
-  /// Response format is identical to the Instagram API — reuses _extractFromPost.
-  Future<List<MediaItem>> _fetchFromApi(
-      String mediaId, String sessionId) async {
+  // Instagram mobile app UA — the Threads app uses this to call i.instagram.com.
+  static const _mobileUA =
+      'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; '
+      'OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)';
+
+  static const _igAppId = '936619743392459';
+
+  /// Calls the media info API using available sessions.
+  /// Order of attempts:
+  ///   1. i.instagram.com with mobile UA + x-ig-app-id + IG sessionid
+  ///      (what the Threads mobile app actually calls)
+  ///   2. threads.com with desktop UA + threads.com sessionid
+  ///      (requires threads session captured after IG login)
+  ///   3. threads.com with desktop UA + IG sessionid (last resort)
+  Future<List<MediaItem>> _fetchFromApi(String mediaId,
+      {String? igSessionId, String? threadsSessionId}) async {
+    // Attempt 1: Instagram mobile API (same as what the Threads app uses)
+    if (igSessionId != null) {
+      try {
+        final apiDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 30),
+          followRedirects: false, // 302 = not authed, don't follow to HTML login
+          headers: {
+            'User-Agent': _mobileUA,
+            'Cookie': 'sessionid=$igSessionId',
+            'x-ig-app-id': _igAppId,
+            'Accept': 'application/json',
+          },
+        ));
+        final resp = await apiDio.get<Map<String, dynamic>>(
+          'https://i.instagram.com/api/v1/media/$mediaId/info/',
+        );
+        if (resp.statusCode == 200 && resp.data != null) {
+          final items = _parseApiResponse(resp.data!);
+          if (items.isNotEmpty) {
+            debugPrint('[Threads] i.instagram.com API: ${items.length} items');
+            return items;
+          }
+        }
+      } on DioException catch (e) {
+        debugPrint('[Threads] i.instagram.com API failed: ${e.response?.statusCode} ${e.message}');
+      }
+    }
+
+    // Attempt 2: threads.com API with threads-domain session
+    final threadsSession = threadsSessionId;
+    if (threadsSession != null) {
+      try {
+        final items = await _callThreadsApi(mediaId, threadsSession);
+        if (items.isNotEmpty) {
+          debugPrint('[Threads] threads.com API (threads session): ${items.length} items');
+          return items;
+        }
+      } catch (e) {
+        debugPrint('[Threads] threads.com API (threads session) failed: $e');
+      }
+    }
+
+    // Attempt 3: threads.com API with IG session (may work if sessions are shared)
+    if (igSessionId != null) {
+      try {
+        final items = await _callThreadsApi(mediaId, igSessionId);
+        if (items.isNotEmpty) {
+          debugPrint('[Threads] threads.com API (ig session): ${items.length} items');
+          return items;
+        }
+      } catch (e) {
+        debugPrint('[Threads] threads.com API (ig session) failed: $e');
+      }
+    }
+
+    return [];
+  }
+
+  Future<List<MediaItem>> _callThreadsApi(String mediaId, String sessionId) async {
     final apiDio = Dio(BaseOptions(
       connectTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(seconds: 30),
-      followRedirects: true,
-      maxRedirects: 5,
+      followRedirects: false,
       headers: {
         'User-Agent': _desktopUA,
         'Cookie': 'sessionid=$sessionId',
@@ -443,18 +519,18 @@ class ThreadsDownloaderService {
         'Accept-Language': 'en-US,en;q=0.9',
       },
     ));
-
     final resp = await apiDio.get<Map<String, dynamic>>(
       'https://www.threads.com/api/v1/media/$mediaId/info/',
     );
     if (resp.statusCode != 200 || resp.data == null) return [];
+    return _parseApiResponse(resp.data!);
+  }
 
-    final itemsList = resp.data!['items'] as List?;
+  List<MediaItem> _parseApiResponse(Map<String, dynamic> data) {
+    final itemsList = data['items'] as List?;
     if (itemsList == null || itemsList.isEmpty) return [];
-
     final post = itemsList.first as Map<String, dynamic>;
-    final username =
-        (_dig(post, ['user', 'username']) as String?) ?? 'threads';
+    final username = (_dig(post, ['user', 'username']) as String?) ?? 'threads';
     return _extractFromPost(post, username);
   }
 
