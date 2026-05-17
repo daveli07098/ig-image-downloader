@@ -5,14 +5,15 @@ import '../models/media_item.dart';
 
 /// Downloads media from Facebook posts, videos, and Reels.
 ///
-/// Uses the facebookexternalhit user-agent which causes Facebook's servers to
-/// render a fully-populated OG tag response without JavaScript execution. This
-/// works reliably for public posts, videos (/share/r/), and photos (/share/).
+/// Primary strategy: facebookexternalhit UA — Facebook renders fully-populated
+/// OG tags for this UA without JavaScript execution. Works for public content.
+/// For video/reel pages, og:video is intentionally omitted by Facebook; instead,
+/// the real MP4 URL is fetched from /video/embed?video_id=<id> which returns
+/// hd_src/sd_src in its JSON payload.
 ///
-/// When the user is logged in (fbCookies provided), switches to a real browser
-/// UA so authenticated requests look like a genuine browser session, not a bot.
-/// Mixing facebookexternalhit UA with user session cookies is a strong
-/// automated-behaviour signal — the two are intentionally kept separate.
+/// NEVER mix user session cookies with facebookexternalhit UA — that combination
+/// is an instant automation detection signal. User cookies are only used in the
+/// browser-UA fallback when bot UA finds nothing (private content).
 ///
 /// URL formats supported:
 ///   https://www.facebook.com/share/XXXXXXXX/         (post/photo)
@@ -73,25 +74,16 @@ class FacebookDownloaderService {
 
   /// [fbCookies] — the full Facebook cookie string captured from the WebView
   /// login (contains c_user, xs, datr, etc.). When provided, authenticated
-  /// pages are fetched which unlocks video URLs and private content.
+  /// pages are used as a private-content fallback after public fetch fails.
   Future<List<MediaItem>> fetchItems(String url, {String? fbCookies}) async {
     final cleanUrl = url.split('?').first;
     debugPrint('[FB] URL: $cleanUrl  session: ${fbCookies != null ? 'YES' : 'NO'}');
 
-    if (fbCookies != null) {
-      // Authenticated: look like a real browser, NOT a bot.
-      // facebookexternalhit + user cookies = instant automation signal.
-      _dio.options.headers['User-Agent'] = _browserUA;
-      _dio.options.headers['Cookie'] = fbCookies;
-      _dio.options.headers['Referer'] = 'https://www.facebook.com/';
-      _dio.options.headers['Accept'] =
-          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
-      _dio.options.headers['sec-fetch-dest'] = 'document';
-      _dio.options.headers['sec-fetch-mode'] = 'navigate';
-      _dio.options.headers['sec-fetch-site'] = 'same-origin';
-    }
-    // No cookies: keep the default botUA which gets full OG tags for public content.
-
+    // Always fetch with bot UA first — Facebook returns full OG tags for
+    // facebookexternalhit and the response is reliably parseable.
+    // Browser UA returns a React SPA without OG tags, so it cannot be used
+    // for the primary fetch. User cookies are NEVER sent with the bot UA
+    // request (mixing the two is an automation detection signal).
     final resp = await _dio.get<String>(cleanUrl);
 
     if (resp.statusCode != 200 || resp.data == null) {
@@ -106,6 +98,8 @@ class FacebookDownloaderService {
     // ── Parse OG tags ─────────────────────────────────────────────────────
     final document = html_parser.parse(html);
     String? ogVideoUrl;
+    String? ogType;
+    String? ogUrl;
     final ogImages = <String>[];
 
     for (final tag in document.querySelectorAll('meta[property]')) {
@@ -126,6 +120,10 @@ class FacebookDownloaderService {
             !ogImages.contains(content)) {
           ogImages.add(content);
         }
+      } else if (property == 'og:type' && ogType == null) {
+        ogType = content;
+      } else if (property == 'og:url' && ogUrl == null) {
+        ogUrl = content;
       }
     }
 
@@ -153,16 +151,48 @@ class FacebookDownloaderService {
     // Try JSON patterns in main page source
     realVideoUrl ??= _extractVideoUrlFromJson(html);
 
-    // Fetch the embed page and look for the video there
+    // ── Video embed URL strategy ────────────────────────────────────────
+    // Facebook reels/videos never include og:video in bot UA responses — the
+    // actual MP4 URL lives in the /video/embed?video_id=<id> endpoint.
+    // When og:type is "video.other" and no MP4 found yet, extract the video
+    // ID from the resolved og:url or final URL and fetch the embed page.
+    if (realVideoUrl == null && ogType == 'video.other') {
+      final videoId = _extractVideoIdFromUrl(ogUrl ?? finalUrl);
+      if (videoId != null) {
+        try {
+          final embedUrl =
+              'https://www.facebook.com/video/embed?video_id=$videoId';
+          debugPrint('[FB] Trying video embed endpoint: $embedUrl');
+          final embedDio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+            followRedirects: true,
+            maxRedirects: 8,
+            headers: {
+              'User-Agent': _botUA,
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          ));
+          final embedResp = await embedDio.get<String>(embedUrl);
+          if (embedResp.statusCode == 200 && embedResp.data != null) {
+            realVideoUrl = _extractVideoUrlFromJson(embedResp.data!);
+            debugPrint(
+                '[FB] Embed endpoint video: ${realVideoUrl != null ? "found" : "not found"}');
+          }
+        } catch (e) {
+          debugPrint('[FB] Video embed fetch failed: $e');
+        }
+      }
+    }
+
+    // Legacy: if ogVideoUrl is an embed/php URL (not a CDN URL), fetch it
     if (realVideoUrl == null && ogVideoUrl != null) {
       final isEmbedUrl = ogVideoUrl.contains('embed') ||
           ogVideoUrl.contains('video.php') ||
           !ogVideoUrl.contains('fbcdn.net');
       if (isEmbedUrl) {
         try {
-          debugPrint('[FB] Fetching embed URL: $ogVideoUrl');
-          // Embed URLs are public — use the bot UA without user cookies to
-          // avoid linking authenticated sessions to crawler-style fetches.
+          debugPrint('[FB] Fetching legacy embed URL: $ogVideoUrl');
           final embedDio = Dio(BaseOptions(
             connectTimeout: const Duration(seconds: 15),
             receiveTimeout: const Duration(seconds: 30),
@@ -179,10 +209,10 @@ class FacebookDownloaderService {
             realVideoUrl = _extractVideoUrlFromJson(embedHtml) ??
                 _extractVideoTagSrc(embedHtml);
             debugPrint(
-                '[FB] Embed page video: ${realVideoUrl != null ? "found" : "not found"}');
+                '[FB] Legacy embed video: ${realVideoUrl != null ? "found" : "not found"}');
           }
         } catch (e) {
-          debugPrint('[FB] Embed fetch failed: $e');
+          debugPrint('[FB] Legacy embed fetch failed: $e');
         }
       }
     }
@@ -218,6 +248,67 @@ class FacebookDownloaderService {
         itemIndex: items.length + 1,
         postTimestamp: now,
       ));
+    }
+
+    // ── Private content fallback ──────────────────────────────────────────
+    // If bot UA found nothing AND the user is logged in, retry with browser
+    // UA + cookies. The browser response is a React SPA — no OG tags — so
+    // we fall back to JSON pattern extraction only.
+    if (items.isEmpty && fbCookies != null) {
+      debugPrint('[FB] Bot UA found nothing; retrying with auth browser UA...');
+      try {
+        final authDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 30),
+          followRedirects: true,
+          maxRedirects: 8,
+          headers: {
+            'User-Agent': _browserUA,
+            'Cookie': fbCookies,
+            'Referer': 'https://www.facebook.com/',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+          },
+        ));
+        final authResp = await authDio.get<String>(cleanUrl);
+        if (authResp.statusCode == 200 && authResp.data != null) {
+          final authHtml = authResp.data!;
+          final authVideoUrl = _extractVideoUrlFromJson(authHtml);
+          final authImages = <String>[];
+          _extractCarouselImagesFromJson(authHtml, authImages);
+
+          if (authVideoUrl != null) {
+            items.add(MediaItem(
+              id: '0',
+              mediaUrl: authVideoUrl,
+              thumbnailUrl: authImages.isNotEmpty ? authImages.first : null,
+              type: MediaItemType.video,
+              username: username,
+              itemIndex: 1,
+              postTimestamp: now,
+            ));
+          }
+          for (var i = 0; i < authImages.length; i++) {
+            if (authVideoUrl != null && i == 0) continue;
+            items.add(MediaItem(
+              id: '${items.length}',
+              mediaUrl: authImages[i],
+              thumbnailUrl: authImages[i],
+              type: MediaItemType.image,
+              username: username,
+              itemIndex: items.length + 1,
+              postTimestamp: now,
+            ));
+          }
+          debugPrint(
+              '[FB] Auth retry: video=${authVideoUrl != null}, images=${authImages.length}');
+        }
+      } catch (e) {
+        debugPrint('[FB] Auth retry failed: $e');
+      }
     }
 
     if (items.isEmpty) {
@@ -296,6 +387,16 @@ class FacebookDownloaderService {
         }
       }
     }
+  }
+
+  /// Extracts a numeric video/reel ID from a Facebook URL.
+  /// Matches /reel/<id>/ and /videos/<id>/ path segments.
+  static String? _extractVideoIdFromUrl(String url) {
+    final re = RegExp(
+      r'/(?:reel|videos|video)/([\d]+)',
+      caseSensitive: false,
+    );
+    return re.firstMatch(url)?.group(1);
   }
 
   /// Extracts a video URL from a `<video src="...">` tag in embed page HTML.
