@@ -301,12 +301,22 @@ class FacebookDownloaderService {
             finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
         final authResp = await earlyAuthDio.get<String>(resolvedUrl);
         if (authResp.statusCode == 200 && authResp.data != null) {
-          if (realVideoUrl == null) {
+          // Only extract a video URL for video pages.
+          // The desktop auth HTML contains the ENTIRE Facebook feed —
+          // recommendations, sidebar, ads — so any video URL found on a
+          // non-video page is a false positive from an unrelated video
+          // (e.g. a recommended reel in the sidebar), not the actual post.
+          if (isVideoPage && realVideoUrl == null) {
             realVideoUrl = _extractVideoUrlFromJson(authResp.data!);
           }
-          _extractCarouselImagesFromJson(authResp.data!, allImages);
+          // Do NOT run _extractCarouselImagesFromJson on desktop auth HTML.
+          // The full SPA has hundreds of CDN image URLs from the entire feed
+          // (profile pictures, ads, recommendations) — scanning it for image
+          // URLs produces 200-300 false results that overwhelm the actual post
+          // images. Carousel images are extracted from mbasic below, which
+          // serves only the post content in plain server-rendered HTML.
           debugPrint(
-              '[FB] Auth result: video=${realVideoUrl != null}, images: ${allImages.length}');
+              '[FB] Auth result: video=${realVideoUrl != null}');
         }
       } catch (e) {
         debugPrint('[FB] Auth fetch failed: $e');
