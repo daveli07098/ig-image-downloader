@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -77,26 +78,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
       if (sessionId == null) return null;
-      // Use mobile endpoint (i.instagram.com) — only needs sessionid, no
-      // browser-context cookies, and returns JSON errors instead of redirects.
+      // Load the home page — IG SSR embeds viewer.username in __NEXT_DATA__.
+      // A plain GET with only sessionid works; csrftoken only needed for mutations.
       final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 10),
-        receiveTimeout: const Duration(seconds: 10),
-        followRedirects: false,
+        connectTimeout: const Duration(seconds: 15),
+        receiveTimeout: const Duration(seconds: 15),
         headers: {
-          'User-Agent':
-              'Instagram 269.0.0.18.75 Android (33/13; 420dpi; 1080x2400; '
-              'Google/google; Pixel 6; oriole; arm64-v8a; en_US; 437097976)',
+          'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 6) AppleWebKit/537.36 '
+              '(KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
           'Cookie': 'sessionid=$sessionId',
-          'X-IG-App-ID': '567067343352427',
+          'Accept-Language': 'en-US,en;q=0.9',
         },
       ));
-      final resp = await dio.get<Map<String, dynamic>>(
-        'https://i.instagram.com/api/v1/accounts/current_user/',
-        queryParameters: {'edit': 'true'},
-      );
-      final user = resp.data?['user'] as Map<String, dynamic>?;
-      return user?['username'] as String?;
+      final resp = await dio.get<String>('https://www.instagram.com/');
+      final finalPath = resp.realUri.path;
+      if (finalPath.contains('/accounts/login') || finalPath.contains('/challenge')) {
+        return null;
+      }
+      final html = resp.data ?? '';
+      // Extract __NEXT_DATA__ JSON and navigate props.pageProps.viewer.username
+      final scriptMatch =
+          RegExp(r'<script id="__NEXT_DATA__"[^>]*>({.+?})</script>', dotAll: true)
+              .firstMatch(html);
+      if (scriptMatch != null) {
+        try {
+          final data = jsonDecode(scriptMatch.group(1)!) as Map<String, dynamic>;
+          final viewer = (data['props'] as Map?)?['pageProps']?['viewer'];
+          if (viewer is Map) return viewer['username'] as String?;
+        } catch (_) {}
+      }
+      return null;
     } catch (e) {
       debugPrint('[Home] IG username resolve: $e');
       return null;
@@ -134,9 +145,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               '%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
         },
       ));
-      // X web-app internal path — api.x.com/1.1 returns 404 for web clients.
+      // api.twitter.com is the legacy v1.1 host — still serves verify_credentials
+      // whereas api.x.com and x.com/i/api both return 404 for this endpoint.
       final resp = await dio.get<Map<String, dynamic>>(
-        'https://x.com/i/api/1.1/account/verify_credentials.json',
+        'https://api.twitter.com/1.1/account/verify_credentials.json',
         queryParameters: {'include_entities': 'false', 'skip_status': 'true'},
       );
       return resp.data?['screen_name'] as String?;
@@ -285,7 +297,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.38',
+                    'v1.0.0.39',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
