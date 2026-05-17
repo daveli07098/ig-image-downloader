@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/download_queue_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/share_intent_provider.dart';
+import '../services/dev_logger.dart';
 import '../services/session_service.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
@@ -67,6 +68,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
     _controller.clear();
     _focusNode.unfocus();
+    // Clear the dev log and signal the overlay to auto-open so the fetch
+    // logs are visible immediately when the SelectionScreen appears.
+    DevLogger.instance.startNewSession();
     Navigator.of(context).push(
       MaterialPageRoute(
         builder: (_) => SelectionScreen(igUrl: trimmed),
@@ -154,7 +158,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.23',
+                    'v1.0.0.24',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],

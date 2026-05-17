@@ -339,11 +339,15 @@ class DownloaderService {
       } else {
         final imageUrl = _bestImageUrl(slide);
         if (imageUrl != null) {
+          // Safety net: if the image CDN URL is actually a video, reclassify.
+          final effectiveType = _urlLooksLikeVideo(imageUrl)
+              ? MediaItemType.video
+              : MediaItemType.image;
           items.add(MediaItem(
             id: '$i',
             mediaUrl: imageUrl,
-            thumbnailUrl: imageUrl,
-            type: MediaItemType.image,
+            thumbnailUrl: effectiveType == MediaItemType.video ? null : imageUrl,
+            type: effectiveType,
             username: username,
             itemIndex: i + 1,
             postTimestamp: ts,
@@ -392,9 +396,13 @@ class DownloaderService {
       final url = _unescape(m.group(1)!);
       if (url.startsWith('https://') && !videos.contains(url)) videos.add(url);
     }
-    for (final m in RegExp(r'"display_url"\s*:\s*"([^"]+)"').allMatches(html)) {
+    for (final m
+        in RegExp(r'"display_url"\s*:\s*"([^"]+)"').allMatches(html)) {
       final url = _unescape(m.group(1)!);
-      if (url.startsWith('https://') && !images.any((u) => _sameMedia(u, url))) {
+      // If this "display_url" is actually a video CDN URL, treat it as video
+      if (_urlLooksLikeVideo(url)) {
+        if (!videos.contains(url)) videos.add(url);
+      } else if (!images.any((u) => _sameMedia(u, url))) {
         images.add(url);
       }
     }
@@ -485,6 +493,17 @@ class DownloaderService {
 
   String _unescape(String s) =>
       s.replaceAll(r'\/', '/').replaceAll(r'\u0026', '&');
+
+  /// Returns true when a CDN URL is clearly a video regardless of OG type.
+  /// Used as a fallback when the HTML scraper can't determine type from OG tags.
+  static bool _urlLooksLikeVideo(String url) {
+    final lower = url.toLowerCase().split('?').first;
+    return lower.endsWith('.mp4') ||
+        lower.endsWith('.mov') ||
+        lower.contains('t50.2886-16') || // Instagram video CDN path
+        lower.contains('/video/') ||
+        lower.contains('video_url');
+  }
 
   // ── 2.  Download a single MediaItem ───────────────────────────────────
 

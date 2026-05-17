@@ -41,6 +41,11 @@ class _DevLogOverlayState extends State<DevLogOverlay> {
 
   void _onNewLog() {
     if (!mounted) return;
+    // Auto-open when a new fetch session starts (requested by HomeScreen).
+    if (_logger.openRequested) {
+      _logger.openRequested = false;
+      _open = true;
+    }
     setState(() {});
     if (_open) _scrollToBottom();
   }

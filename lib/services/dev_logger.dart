@@ -18,6 +18,18 @@ class DevLogger extends ChangeNotifier {
   final List<LogEntry> _entries = [];
   List<LogEntry> get entries => List.unmodifiable(_entries);
 
+  /// Set by callers (e.g. HomeScreen) when a new fetch starts.
+  /// The DevLogOverlay reads this on the next rebuild and auto-opens.
+  bool openRequested = false;
+
+  /// Clear the log and request the overlay to auto-open.
+  /// Call this whenever a new media fetch begins.
+  void startNewSession() {
+    _entries.clear();
+    openRequested = true;
+    notifyListeners();
+  }
+
   void add(String message) {
     _entries.add(LogEntry(message));
     if (_entries.length > _maxEntries) {
