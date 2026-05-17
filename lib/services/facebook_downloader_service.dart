@@ -9,6 +9,11 @@ import '../models/media_item.dart';
 /// render a fully-populated OG tag response without JavaScript execution. This
 /// works reliably for public posts, videos (/share/r/), and photos (/share/).
 ///
+/// When the user is logged in (fbCookies provided), switches to a real browser
+/// UA so authenticated requests look like a genuine browser session, not a bot.
+/// Mixing facebookexternalhit UA with user session cookies is a strong
+/// automated-behaviour signal — the two are intentionally kept separate.
+///
 /// URL formats supported:
 ///   https://www.facebook.com/share/XXXXXXXX/         (post/photo)
 ///   https://www.facebook.com/share/r/XXXXXXXX/       (reel/video)
@@ -16,9 +21,15 @@ import '../models/media_item.dart';
 ///   https://www.facebook.com/<user>/posts/<id>/
 ///   https://www.facebook.com/reel/<id>/
 class FacebookDownloaderService {
-  // Facebook renders full OG tags for their own crawler UA.
-  static const _ua =
+  // Bot UA: causes Facebook to render full OG tags for anonymous/public content.
+  static const _botUA =
       'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
+
+  // Browser UA: used for authenticated requests so they look like a real user.
+  // Never mix this with facebookexternalhit — bots don't have user sessions.
+  static const _browserUA =
+      'Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0.6367.82 Mobile Safari/537.36';
 
   final Dio _dio;
 
@@ -30,7 +41,7 @@ class FacebookDownloaderService {
               followRedirects: true,
               maxRedirects: 8,
               headers: {
-                'User-Agent': _ua,
+                'User-Agent': _botUA,
                 'Accept-Language': 'en-US,en;q=0.9',
               },
             ));
@@ -67,10 +78,19 @@ class FacebookDownloaderService {
     final cleanUrl = url.split('?').first;
     debugPrint('[FB] URL: $cleanUrl  session: ${fbCookies != null ? 'YES' : 'NO'}');
 
-    // Inject Facebook session cookies when available
     if (fbCookies != null) {
+      // Authenticated: look like a real browser, NOT a bot.
+      // facebookexternalhit + user cookies = instant automation signal.
+      _dio.options.headers['User-Agent'] = _browserUA;
       _dio.options.headers['Cookie'] = fbCookies;
+      _dio.options.headers['Referer'] = 'https://www.facebook.com/';
+      _dio.options.headers['Accept'] =
+          'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
+      _dio.options.headers['sec-fetch-dest'] = 'document';
+      _dio.options.headers['sec-fetch-mode'] = 'navigate';
+      _dio.options.headers['sec-fetch-site'] = 'same-origin';
     }
+    // No cookies: keep the default botUA which gets full OG tags for public content.
 
     final resp = await _dio.get<String>(cleanUrl);
 
@@ -141,7 +161,19 @@ class FacebookDownloaderService {
       if (isEmbedUrl) {
         try {
           debugPrint('[FB] Fetching embed URL: $ogVideoUrl');
-          final embedResp = await _dio.get<String>(ogVideoUrl);
+          // Embed URLs are public — use the bot UA without user cookies to
+          // avoid linking authenticated sessions to crawler-style fetches.
+          final embedDio = Dio(BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 30),
+            followRedirects: true,
+            maxRedirects: 8,
+            headers: {
+              'User-Agent': _botUA,
+              'Accept-Language': 'en-US,en;q=0.9',
+            },
+          ));
+          final embedResp = await embedDio.get<String>(ogVideoUrl);
           if (embedResp.statusCode == 200 && embedResp.data != null) {
             final embedHtml = embedResp.data!;
             realVideoUrl = _extractVideoUrlFromJson(embedHtml) ??
