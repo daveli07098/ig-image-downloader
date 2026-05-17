@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
@@ -292,22 +294,37 @@ class FacebookDownloaderService {
     if (fbCookies != null && isVideoPage && realVideoUrl == null) {
       debugPrint('[FB] Auth fetch for video (no URL found yet)');
       try {
+        // Small random delay before authenticated fetch — breaks the pattern of
+        // back-to-back requests with millisecond precision, which is a reliable
+        // signal for automation detection systems.
+        await Future.delayed(
+            Duration(milliseconds: 100 + Random().nextInt(200)));
         final earlyAuthDio = Dio(BaseOptions(
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
           followRedirects: true,
           maxRedirects: 8,
           headers: {
-            // Desktop UA — avoids intent:// / fb:// deep-link redirects
-            // that Facebook sends when it detects a mobile authenticated request.
+            // Desktop UA — avoids intent:// / fb:// deep-link redirects.
             'User-Agent': _authUA,
             'Cookie': fbCookies,
-            'Referer': 'https://www.facebook.com/',
-            'Accept':
-                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            // sec-fetch-site: none = direct navigation (URL typed / opened from
+            // an external app). 'same-origin' would mean the request originated
+            // from within Facebook — incorrect and a detectable inconsistency.
+            // No Referer header on direct navigation (same reason).
             'sec-fetch-dest': 'document',
             'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            // Chrome client hints — Chrome sends these for all HTTPS navigations.
+            'sec-ch-ua':
+                '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Upgrade-Insecure-Requests': '1',
           },
         ));
         // Use the redirect-resolved URL — share URLs (/share/...) may redirect
@@ -362,9 +379,12 @@ class FacebookDownloaderService {
         debugPrint('[FB] mbasic carousel: $mbasicUrl');
         final mbasicHeaders = <String, String>{
           'User-Agent': _mbasicUA,
+          // Referer: visiting mbasic from within mbasic (e.g. tapping a link)
           'Referer': 'https://mbasic.facebook.com/',
           'Accept':
               'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+          'Accept-Language': 'en-US,en;q=0.9',
+          'Upgrade-Insecure-Requests': '1',
         };
         if (fbCookies != null) mbasicHeaders['Cookie'] = fbCookies;
         final mbasicDio = Dio(BaseOptions(
@@ -486,6 +506,8 @@ class FacebookDownloaderService {
     if (items.isEmpty && fbCookies != null) {
       debugPrint('[FB] Bot UA found nothing; retrying with auth browser UA...');
       try {
+        await Future.delayed(
+            Duration(milliseconds: 150 + Random().nextInt(200)));
         final authDio = Dio(BaseOptions(
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
@@ -495,12 +517,18 @@ class FacebookDownloaderService {
             // Desktop UA — same reason as earlyAuthDio: avoids intent:// redirects.
             'User-Agent': _authUA,
             'Cookie': fbCookies,
-            'Referer': 'https://www.facebook.com/',
-            'Accept':
-                'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'sec-fetch-dest': 'document',
             'sec-fetch-mode': 'navigate',
-            'sec-fetch-site': 'same-origin',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'sec-ch-ua':
+                '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Upgrade-Insecure-Requests': '1',
           },
         ));
         // Use resolved URL (not share URL) to avoid an extra redirect hop.
