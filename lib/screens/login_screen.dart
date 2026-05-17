@@ -133,8 +133,17 @@ class _LoginScreenState extends State<LoginScreen> {
     if (token != null && token.isNotEmpty) {
       _captured = true;
       await SessionService.saveSessionId(widget.platform, token);
-      // Resolve display username in background — non-blocking
-      _fetchAndSaveUsername(token).ignore();
+      // Fetch username NOW, while the WebView is still alive (before pop).
+      // We intentionally do NOT make extra HTTP requests to Instagram — the
+      // x-ig-app-id API call we removed was triggering automated-behaviour warnings.
+      try {
+        final username = await _fetchUsernameFromPage(token);
+        if (username != null && username.isNotEmpty) {
+          await SessionService.saveUsername(widget.platform, username);
+        }
+      } catch (e) {
+        debugPrint('[Login/${_cfg.label}] username fetch failed: $e');
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Logged in to ${_cfg.label} — unlocked!')),
@@ -146,48 +155,39 @@ class _LoginScreenState extends State<LoginScreen> {
 
   // ── Username resolution ────────────────────────────────────────────────
 
-  Future<void> _fetchAndSaveUsername(String token) async {
-    try {
-      String? username;
-      switch (widget.platform) {
-        case LoginPlatform.instagram:
-          username = await _fetchIgUsername(token);
-        case LoginPlatform.x:
-          username = await _fetchXUsername(token);
-        case LoginPlatform.facebook:
-          username = _extractFbUserId(token);
-      }
-      if (username != null && username.isNotEmpty) {
-        await SessionService.saveUsername(widget.platform, username);
-      }
-    } catch (e) {
-      debugPrint('[Login/${_cfg.label}] username fetch failed: $e');
+  Future<String?> _fetchUsernameFromPage(String token) async {
+    switch (widget.platform) {
+      case LoginPlatform.instagram:
+        return _fetchIgUsernameFromWebView();
+      case LoginPlatform.x:
+        return _fetchXUsername(token);
+      case LoginPlatform.facebook:
+        return _extractFbUserId(token);
     }
   }
 
-  /// Calls the Instagram internal API to get the logged-in user's username.
-  Future<String?> _fetchIgUsername(String sessionId) async {
+  /// Reads the Instagram username from the already-loaded WebView page via JS.
+  /// NO extra HTTP requests are made — the previous x-ig-app-id API call was
+  /// triggering Instagram's automated-behaviour detection.
+  Future<String?> _fetchIgUsernameFromWebView() async {
     try {
-      final dio = Dio(BaseOptions(
-        connectTimeout: const Duration(seconds: 10),
-        receiveTimeout: const Duration(seconds: 10),
-        headers: {
-          'User-Agent':
-              'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) '
-              'AppleWebKit/605.1.15 (KHTML, like Gecko) '
-              'Version/17.0 Mobile/15E148 Safari/604.1',
-          'Cookie': 'sessionid=$sessionId',
-          'x-ig-app-id': '936619743392459',
-        },
-      ));
-      final resp = await dio.get<Map<String, dynamic>>(
-        'https://www.instagram.com/api/v1/accounts/current_user/',
-        queryParameters: {'edit': 'true'},
-      );
-      final user = resp.data?['user'] as Map<String, dynamic>?;
-      return user?['username'] as String?;
+      final result = await _webController.runJavaScriptReturningResult(r'''
+        (function() {
+          try {
+            var s = document.getElementById('__NEXT_DATA__');
+            if (s) {
+              var d = JSON.parse(s.textContent);
+              var v = d && d.props && d.props.pageProps && d.props.pageProps.viewer;
+              if (v && v.username) return v.username;
+            }
+          } catch(e) {}
+          return '';
+        })()
+      ''');
+      final str = result.toString().replaceAll('"', '').trim();
+      return (str.isEmpty || str == 'null') ? null : str;
     } catch (e) {
-      debugPrint('[Login] IG username fetch failed: $e');
+      debugPrint('[Login] IG username from WebView JS failed: $e');
       return null;
     }
   }
