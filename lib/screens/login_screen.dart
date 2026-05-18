@@ -125,30 +125,7 @@ class _LoginScreenState extends State<LoginScreen> {
           if ((error.isForMainFrame ?? true) &&
               (error.errorType == WebResourceErrorType.redirectLoop ||
                   error.description.toLowerCase().contains('redirect'))) {
-            _webController.loadRequest(Uri.parse('about:blank'));
-            if (mounted) {
-              showDialog(
-                context: context,
-                barrierDismissible: false,
-                builder: (ctx) => AlertDialog(
-                  title: const Text('Instagram Security Check Required'),
-                  content: const Text(
-                    'Instagram needs you to verify your account, but this '
-                    'verification cannot complete inside the app browser.\n\n'
-                    'Please:\n'
-                    '1. Open Instagram in Chrome on this device\n'
-                    '2. Log in and complete the verification there\n'
-                    '3. Come back here and log in again',
-                  ),
-                  actions: [
-                    TextButton(
-                      onPressed: () => Navigator.pop(ctx),
-                      child: const Text('OK'),
-                    ),
-                  ],
-                ),
-              );
-            }
+            _handleRedirectLoop();
           }
         },
       ))
@@ -159,6 +136,8 @@ class _LoginScreenState extends State<LoginScreen> {
 
   Future<void> _tryCaptureSession(String url) async {
     if (_captured) return;
+    // Skip: we navigated here to stop a redirect loop (handled by _handleRedirectLoop).
+    if (url.startsWith('about:')) return;
     // Stay on login pages until the user actually completes login.
     if (_cfg.loginFlowPatterns.any((p) => url.contains(p))) return;
 
@@ -236,6 +215,71 @@ class _LoginScreenState extends State<LoginScreen> {
         Navigator.of(context).pop(true);
       }
     }
+  }
+
+  // ── Redirect loop recovery ────────────────────────────────────────────
+
+  /// Called when ERR_TOO_MANY_REDIRECTS fires on the main frame.
+  /// Captures the session from current cookies (before navigating away),
+  /// stops the loop by loading about:blank, shows an explanatory dialog,
+  /// then closes the login screen cleanly.
+  Future<void> _handleRedirectLoop() async {
+    if (_captured) return;
+
+    // Try to save the IG session that was set before the challenge fired.
+    bool sessionSaved = false;
+    try {
+      final rawCookies = await _readRawCookiesFromNative(_cfg.cookieDomain);
+      if (rawCookies != null) {
+        for (final part in rawCookies.split(';')) {
+          final kv = part.trim().split('=');
+          if (kv.length >= 2 && kv[0].trim() == _cfg.cookieName) {
+            final token = kv.sublist(1).join('=').trim();
+            if (token.isNotEmpty) {
+              _captured = true;
+              await SessionService.saveSessionId(widget.platform, token);
+              sessionSaved = true;
+              debugPrint('[Login/${_cfg.label}] session captured before redirect loop abort');
+            }
+            break;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[Login/${_cfg.label}] redirect loop: cookie read failed: $e');
+    }
+
+    // Stop the redirect chain.
+    await _webController.loadRequest(Uri.parse('about:blank'));
+
+    if (!mounted) return;
+
+    // Show dialog and AWAIT it — so Navigator.pop below runs after OK is tapped,
+    // not while the dialog is still the top route.
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Instagram Security Check Required'),
+        content: const Text(
+          'Instagram needs you to verify your account, but this '
+          'verification cannot complete inside the app browser.\n\n'
+          'Please:\n'
+          '1. Open Instagram in Chrome on this device\n'
+          '2. Log in and complete the verification there\n'
+          '3. Come back here and log in again',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    // Dialog dismissed — now close the login screen.
+    if (mounted) Navigator.of(context).pop(sessionSaved);
   }
 
   // ── Threads session capture (runs after IG login) ──────────────────────
