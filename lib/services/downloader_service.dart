@@ -27,6 +27,11 @@ class DownloaderService {
   static const _crawlerUA =
       'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
 
+  // Desktop Chrome UA — used for browser-facing pages (embed, main page)
+  static const _desktopUA =
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 '
+      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
   // Instagram Android app user-agent — required for the private API
   static const _mobileUA =
       'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; '
@@ -35,8 +40,9 @@ class DownloaderService {
   // Web client app ID accepted by i.instagram.com without an app-level token
   static const _igAppId = '936619743392459';
 
-  final Dio _dio;    // HTML page fetching (crawler UA)
-  final Dio _apiDio; // Instagram private API (mobile UA + App-ID)
+  final Dio _dio;        // OG-tag fetching (crawler UA)
+  final Dio _desktopDio; // Browser-facing pages: embed + main page fallback
+  final Dio _apiDio;     // Instagram private API (mobile UA + App-ID)
 
   DownloaderService({Dio? dio})
       : _dio = dio ??
@@ -44,9 +50,6 @@ class DownloaderService {
               BaseOptions(
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 60),
-                // Instagram embed pages chain up to 8 redirects (HTTPS upgrade,
-                // www normalisation, locale redirect, etc.). The Dio default of 5
-                // causes "Redirect limit exceeded" on the embed/captioned/ strategy.
                 followRedirects: true,
                 maxRedirects: 10,
                 headers: {
@@ -56,6 +59,20 @@ class DownloaderService {
                 },
               ),
             ),
+        _desktopDio = Dio(
+          BaseOptions(
+            connectTimeout: const Duration(seconds: 15),
+            receiveTimeout: const Duration(seconds: 60),
+            followRedirects: true,
+            maxRedirects: 10,
+            headers: {
+              'User-Agent': _desktopUA,
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.9',
+              'Referer': 'https://www.instagram.com/',
+            },
+          ),
+        ),
         _apiDio = Dio(
           BaseOptions(
             connectTimeout: const Duration(seconds: 15),
@@ -151,17 +168,15 @@ class DownloaderService {
       );
     }
 
-    // ── Strategy A: embed captioned page ────────────────────────────────
-    // The /embed/captioned/ endpoint is a public iframe page — it is NOT
-    // designed to consume auth cookies. Sending sessionid causes Instagram to
-    // attempt a redirect to an "authenticated" variant. Without the full
-    // cookie suite (csrftoken, mid, ds_user_id …) the redirect never converges
-    // and Dio hits its maxRedirects limit. Fetch without any cookie; Strategy 0
-    // (private API) already covers authenticated access.
+    // ── Strategy A: embed captioned page (desktop Chrome UA, no cookie) ──
+    // The /embed/captioned/ endpoint is a public browser-facing iframe. We use
+    // a desktop Chrome UA (not facebookexternalhit) because IG now redirects
+    // bot UAs on this endpoint. No cookie is sent — Strategy 0 already covers
+    // authenticated access, and sending sessionid here triggers a redirect loop.
     try {
       final embedUrl = '${cleanUrl}embed/captioned/';
       debugPrint('[IG] Trying embed: $embedUrl');
-      final resp = await _dio.get<String>(embedUrl);
+      final resp = await _desktopDio.get<String>(embedUrl);
       if (resp.statusCode == 200 && resp.data != null) {
         final items = _parseEmbedPage(resp.data!, cleanUrl);
         if (items.isNotEmpty) {
@@ -173,15 +188,14 @@ class DownloaderService {
       debugPrint('[IG] Embed failed: $e');
     }
 
-    // ── Strategy B: main page ─────────────────────────────────────────────
+    // ── Strategy B: main page (crawler UA, no cookie) ─────────────────────
+    // facebookexternalhit UA reliably gets OG meta tags for public posts.
+    // We do NOT send the session cookie here — bot UA + sessionid is an
+    // instant automation-detection signal that causes IG to redirect to login.
+    // Private posts are handled exclusively by Strategy 0 (private API).
     debugPrint('[IG] Falling back to main page');
     try {
-      final resp = await _dio.get<String>(
-        cleanUrl,
-        options: cookieHeader != null
-            ? Options(headers: {'Cookie': cookieHeader})
-            : null,
-      );
+      final resp = await _dio.get<String>(cleanUrl);
       if (resp.statusCode != 200 || resp.data == null) {
         throw Exception('Failed to load Instagram page (${resp.statusCode})');
       }
