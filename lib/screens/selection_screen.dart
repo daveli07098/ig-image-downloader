@@ -303,6 +303,10 @@ class _LoadingView extends StatelessWidget {
   }
 }
 
+/// Classifies a raw error string into a handling tier so the UI can show
+/// the right indicator, banner text, and cooldown duration for each case.
+enum _ErrorKind { apiRateLimit, redirectLoop, generic }
+
 class _ErrorView extends StatefulWidget {
   const _ErrorView({required this.error, required this.onRetry});
   final String error;
@@ -313,17 +317,26 @@ class _ErrorView extends StatefulWidget {
 }
 
 class _ErrorViewState extends State<_ErrorView> {
-  // Cooldown before the retry button becomes available.
-  // 60 s gives Instagram's rate-limiter time to reset between attempts.
-  static const _cooldownSeconds = 60;
+  late final _ErrorKind _kind;
 
+  // Cooldown seconds before the retry button appears. Tuned per error kind:
+  //   apiRateLimit → 5 min  (IG hourly quota needs breathing room)
+  //   redirectLoop → 2 min  (session likely expired; re-login may be needed)
+  //   generic      → 30 s   (transient error; quick retry is fine)
+  late final int _totalCooldown;
   late int _remaining;
   Timer? _timer;
 
   @override
   void initState() {
     super.initState();
-    _remaining = _cooldownSeconds;
+    _kind = _classifyError(widget.error);
+    _totalCooldown = switch (_kind) {
+      _ErrorKind.apiRateLimit => 300,
+      _ErrorKind.redirectLoop => 120,
+      _ErrorKind.generic      => 30,
+    };
+    _remaining = _totalCooldown;
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (!mounted) return;
       setState(() {
@@ -338,16 +351,57 @@ class _ErrorViewState extends State<_ErrorView> {
     super.dispose();
   }
 
-  // Show the rate-limit banner when the error looks like an API 400.
-  bool get _isRateLimitError {
-    final e = widget.error.toLowerCase();
-    return e.contains('400') || e.contains('rate') || e.contains('redirect limit');
+  /// Maps an error string to its handling tier.
+  /// "Redirect limit exceeded" = our internal 10-hop Dio limit, NOT an API
+  /// rate limit — treat it as a session/redirect-loop issue separately.
+  static _ErrorKind _classifyError(String error) {
+    final e = error.toLowerCase();
+    if (e.contains('redirect')) return _ErrorKind.redirectLoop;
+    if (e.contains('429') ||
+        e.contains('rate') ||
+        (e.contains('400') && (e.contains('wait') || e.contains('many')))) {
+      return _ErrorKind.apiRateLimit;
+    }
+    return _ErrorKind.generic;
+  }
+
+  String get _kindLabel => switch (_kind) {
+    _ErrorKind.apiRateLimit => 'IG API rate limit (~200/hr)',
+    _ErrorKind.redirectLoop => 'Redirect loop (10-hop limit)',
+    _ErrorKind.generic      => 'Download error',
+  };
+
+  IconData get _kindIcon => switch (_kind) {
+    _ErrorKind.apiRateLimit => Icons.timer_outlined,
+    _ErrorKind.redirectLoop => Icons.sync_problem_rounded,
+    _ErrorKind.generic      => Icons.error_outline_rounded,
+  };
+
+  String? get _bannerText => switch (_kind) {
+    _ErrorKind.apiRateLimit =>
+      'Instagram limits private API calls to ~200 per hour per session. '
+      'Waiting lets the hourly quota reset before retrying.',
+    _ErrorKind.redirectLoop =>
+      'Instagram redirected more than 10 times — your session may have '
+      'expired. Try re-logging in from the Accounts tab, then retry.',
+    _ErrorKind.generic => null,
+  };
+
+  /// Formats seconds as "Xm Ys" when ≥ 60 s, otherwise "Xs".
+  static String _formatTime(int s) {
+    if (s >= 60) {
+      final m = s ~/ 60;
+      final r = s % 60;
+      return '${m}m ${r.toString().padLeft(2, '0')}s';
+    }
+    return '${s}s';
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final canRetry = _remaining == 0;
+    final banner = _bannerText;
 
     return Center(
       child: Padding(
@@ -355,6 +409,34 @@ class _ErrorViewState extends State<_ErrorView> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // ── Error kind indicator chip ─────────────────────────────────
+            Container(
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: cs.errorContainer.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(20),
+                border:
+                    Border.all(color: cs.error.withValues(alpha: 0.3)),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(_kindIcon, size: 14, color: cs.error),
+                  const SizedBox(width: 4),
+                  Text(
+                    _kindLabel,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: cs.error,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 12),
+
             Icon(Icons.error_outline_rounded, size: 56, color: cs.error),
             const SizedBox(height: 16),
             Text(
@@ -368,11 +450,12 @@ class _ErrorViewState extends State<_ErrorView> {
               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
             ),
 
-            // ── Rate-limit info banner ───────────────────────────────────
-            if (_isRateLimitError) ...[
+            // ── Error-specific info banner ────────────────────────────────
+            if (banner != null) ...[
               const SizedBox(height: 16),
               Container(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 12, vertical: 10),
                 decoration: BoxDecoration(
                   color: cs.errorContainer.withValues(alpha: 0.35),
                   borderRadius: BorderRadius.circular(10),
@@ -385,8 +468,7 @@ class _ErrorViewState extends State<_ErrorView> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: Text(
-                        'Instagram limits API requests to ~200 per hour per '
-                        'session. Waiting before retrying avoids further throttling.',
+                        banner,
                         style: TextStyle(
                             fontSize: 12, color: cs.onErrorContainer),
                       ),
@@ -407,14 +489,17 @@ class _ErrorViewState extends State<_ErrorView> {
                     width: 72,
                     height: 72,
                     child: CircularProgressIndicator(
-                      value: _remaining / _cooldownSeconds,
+                      value: _remaining / _totalCooldown,
                       strokeWidth: 5,
                       backgroundColor:
                           cs.outline.withValues(alpha: 0.2),
                     ),
                   ),
                   Text(
-                    '$_remaining',
+                    // Show "Xm" inside the ring when ≥ 60 s, else raw seconds.
+                    _remaining >= 60
+                        ? '${_remaining ~/ 60}m'
+                        : '$_remaining',
                     style: Theme.of(context).textTheme.titleLarge?.copyWith(
                           fontWeight: FontWeight.w700,
                         ),
@@ -423,7 +508,7 @@ class _ErrorViewState extends State<_ErrorView> {
               ),
               const SizedBox(height: 8),
               Text(
-                'Retry in $_remaining s',
+                'Retry in ${_formatTime(_remaining)}',
                 style:
                     TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
               ),

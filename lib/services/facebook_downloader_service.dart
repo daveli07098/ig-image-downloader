@@ -352,6 +352,12 @@ class FacebookDownloaderService {
     // _mbasicUA (iOS Safari): mbasic.facebook.com serves basic HTML to mobile
     // UAs. App redirects (fb:// / intent://) only happen on www.facebook.com;
     // mbasic IS the app-free web version and never redirects to the native app.
+    //
+    // phase1Count tracks how many images Phase 1 (photo-link-anchored scan)
+    // found. When it stays at 0 the mbasic page had no per-photo <a> links
+    // (e.g. a /posts/ view) so we cannot trust Phase 2 to be complete; the
+    // auth carousel supplement is then triggered regardless of image count.
+    var phase1Count = 0;
     if (!isVideoPage) {
       try {
         // Build mbasic URL. For photo pages keep fbid/set (identify the album);
@@ -432,6 +438,7 @@ class FacebookDownloaderService {
                     !imgUrl.contains('static.xx.fbcdn') &&
                     !allImages.contains(imgUrl)) {
                   allImages.add(imgUrl);
+                  phase1Count++;
                 }
               }
             }
@@ -465,16 +472,20 @@ class FacebookDownloaderService {
     // ── Auth-based carousel supplement ────────────────────────────────────────
     // share/p/ and other share URL types sometimes deliver only 1 OG image
     // even for multi-photo carousels, and mbasic may not always resolve all
-    // photos. When we have FB cookies and fewer than 4 images found so far on a
-    // non-video page, do an authenticated desktop Chrome fetch to extract
-    // carousel images from Facebook's React SPA JSON — it includes full_picture
-    // / uri for all carousel nodes.
+    // photos. Run an authenticated desktop Chrome fetch to extract carousel
+    // images from Facebook's React SPA JSON when:
     //
-    // Threshold is < 4 (not <= 1) because mbasic for multi-photo /posts/ pages
-    // shows only the first photo inline — Phase 2 adds it, pushing allImages to
-    // length 2, which previously prevented the supplement from running.
-    if (!isVideoPage && allImages.length < 4 && fbCookies != null) {
-      debugPrint('[FB] Only ${allImages.length} image(s); trying auth carousel extract');
+    //   • phase1Count == 0  — mbasic served a /posts/ page with no individual
+    //     <a href="/photo…"> links, so Phase 2 only found the first inline photo;
+    //     we need auth to discover the rest regardless of total count.
+    //   • allImages.length < 5  — safety net for small/partial result sets.
+    //
+    // The call passes the first confirmed image's _nc_cat CDN bucket ID so the
+    // extractor only accepts images in the same bucket (same post/album).
+    final needsAuthCarousel = !isVideoPage && fbCookies != null &&
+        (phase1Count == 0 || allImages.length < 5);
+    if (needsAuthCarousel) {
+      debugPrint('[FB] phase1=$phase1Count imgs=${allImages.length}; trying auth carousel extract');
       try {
         await Future.delayed(Duration(milliseconds: 300 + Random().nextInt(400)));
         final carouselDio = Dio(BaseOptions(
@@ -504,7 +515,13 @@ class FacebookDownloaderService {
             finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
         final carouselResp = await carouselDio.get<String>(resolvedUrl);
         if (carouselResp.statusCode == 200 && carouselResp.data != null) {
-          _extractCarouselImagesFromJson(carouselResp.data!, allImages);
+          // Use the first confirmed image's _nc_cat CDN bucket as a fingerprint
+          // to filter out images from unrelated posts on the same page.
+          final refNcCat = allImages.isNotEmpty
+              ? _extractNcCat(allImages.first)
+              : null;
+          _extractCarouselImagesFromJson(
+              carouselResp.data!, allImages, refNcCat: refNcCat);
           debugPrint('[FB] Auth carousel: ${allImages.length} images after extract');
         }
       } catch (e) {
@@ -677,7 +694,13 @@ class FacebookDownloaderService {
   /// Extracts additional carousel/album image URLs from Facebook's embedded JSON.
   /// Searches multiple field names (`uri`, `src`, `url`) and both CDN domains.
   /// Only adds images not already in [existing].
-  void _extractCarouselImagesFromJson(String html, List<String> existing) {
+  ///
+  /// [refNcCat] — when provided, only images whose `_nc_cat` CDN bucket matches
+  /// this value are accepted. This filters out images from other posts that may
+  /// appear in the same SPA page JSON. Images without the parameter are accepted
+  /// unconditionally (some older URLs omit it).
+  void _extractCarouselImagesFromJson(String html, List<String> existing,
+      {String? refNcCat}) {
     final seen = existing.toSet();
 
     // Facebook uses various field names for image URIs in its JS payloads.
@@ -704,6 +727,7 @@ class FacebookDownloaderService {
             !url.contains('/rsrc') &&
             !url.contains('/emoji') &&
             !url.contains('static.xx.fbcdn') &&
+            _ncCatMatches(url, refNcCat) &&
             seen.add(url)) {
           existing.add(url);
         }
@@ -742,6 +766,21 @@ class FacebookDownloaderService {
     if (m == null) return null;
     final url = _unescape(m.group(1)!);
     return url.startsWith('https://') ? url : null;
+  }
+
+  /// Returns the `_nc_cat` CDN bucket parameter from a Facebook image URL.
+  /// All photos in the same Facebook post/album share the same bucket ID —
+  /// using it as a filter rejects images from unrelated posts on the same page.
+  static String? _extractNcCat(String url) =>
+      Uri.tryParse(url)?.queryParameters['_nc_cat'];
+
+  /// Returns true when [url] belongs to the same CDN bucket as [refNcCat].
+  /// If either side is null (parameter absent) the image is accepted so that
+  /// older URLs without the parameter are never incorrectly rejected.
+  static bool _ncCatMatches(String url, String? refNcCat) {
+    if (refNcCat == null) return true;
+    final cat = Uri.tryParse(url)?.queryParameters['_nc_cat'];
+    return cat == null || cat == refNcCat;
   }
 
   String _unescape(String s) {
