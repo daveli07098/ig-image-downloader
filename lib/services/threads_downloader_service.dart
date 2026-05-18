@@ -339,9 +339,10 @@ class ThreadsDownloaderService {
     final items = <MediaItem>[];
     final seenUrls = <String>{};
 
-    // Video
+    // Video — pattern allows backslash so JSON-encoded https:\/\/ is matched;
+    // _unescape() converts the \/ sequences back to / after capture.
     final videoRe = RegExp(
-      r'"url"\s*:\s*"(https://[^"\\]+t50\.2886-16[^"\\]*\.mp4[^"\\]*)"',
+      r'"url"\s*:\s*"(https[^"]*t50\.2886-16[^"]*\.mp4[^"]*)"',
     );
     for (final m in videoRe.allMatches(html)) {
       final url = _unescape(m.group(1)!);
@@ -358,9 +359,13 @@ class ThreadsDownloaderService {
       }
     }
 
-    // Images — deduplicate by filename (same image at multiple sizes)
+    // Images — CDN-path-specific pattern first (t51.2885-15 = post images),
+    // then a broader scontent/cdninstagram fallback if the specific one finds
+    // nothing. Both allow backslash in the capture group so JSON-encoded
+    // https:\/\/ URLs are matched; _unescape() normalises them afterward.
+    // Deduplicate by filename (same image at multiple sizes).
     final imgRe = RegExp(
-      r'"url"\s*:\s*"(https://[^"\\]+t51\.2885-15[^"\\]+)"',
+      r'"url"\s*:\s*"(https[^"]*t51\.2885-15[^"]+)"',
     );
     final seenFilenames = <String>{};
     final imageUrls = <String>[];
@@ -369,6 +374,26 @@ class ThreadsDownloaderService {
       final filename = url.split('?').first.split('/').last;
       if (seenFilenames.add(filename) && seenUrls.add(url)) {
         imageUrls.add(url);
+      }
+    }
+
+    // Broader fallback: any scontent/cdninstagram image URL in the JSON blob.
+    // Catches carousel images when Threads uses a different CDN path segment
+    // (e.g. t51.29350-15 instead of t51.2885-15). Only runs if the specific
+    // pattern found nothing, to avoid duplicating already-matched images.
+    if (imageUrls.isEmpty && items.isEmpty) {
+      final broadImgRe = RegExp(
+        r'"url"\s*:\s*"(https[^"]*(?:cdninstagram\.com|scontent)[^"]*\.(?:jpg|jpeg|webp)[^"]*)"',
+      );
+      for (final m in broadImgRe.allMatches(html)) {
+        final url = _unescape(m.group(1)!);
+        if (url.contains('/profilepic') || url.contains('/profile_pic')) {
+          continue;
+        }
+        final filename = url.split('?').first.split('/').last;
+        if (seenFilenames.add(filename) && seenUrls.add(url)) {
+          imageUrls.add(url);
+        }
       }
     }
 

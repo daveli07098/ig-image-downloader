@@ -465,11 +465,15 @@ class FacebookDownloaderService {
     // ── Auth-based carousel supplement ────────────────────────────────────────
     // share/p/ and other share URL types sometimes deliver only 1 OG image
     // even for multi-photo carousels, and mbasic may not always resolve all
-    // photos. When we have FB cookies and ≤1 image found so far on a non-video
-    // page, do an authenticated desktop Chrome fetch to extract carousel images
-    // from Facebook's React SPA JSON — it includes full_picture / uri for all
-    // carousel nodes.
-    if (!isVideoPage && allImages.length <= 1 && fbCookies != null) {
+    // photos. When we have FB cookies and fewer than 4 images found so far on a
+    // non-video page, do an authenticated desktop Chrome fetch to extract
+    // carousel images from Facebook's React SPA JSON — it includes full_picture
+    // / uri for all carousel nodes.
+    //
+    // Threshold is < 4 (not <= 1) because mbasic for multi-photo /posts/ pages
+    // shows only the first photo inline — Phase 2 adds it, pushing allImages to
+    // length 2, which previously prevented the supplement from running.
+    if (!isVideoPage && allImages.length < 4 && fbCookies != null) {
       debugPrint('[FB] Only ${allImages.length} image(s); trying auth carousel extract');
       try {
         await Future.delayed(Duration(milliseconds: 300 + Random().nextInt(400)));
