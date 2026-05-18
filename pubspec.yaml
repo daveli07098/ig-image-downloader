@@ -1,7 +1,7 @@
 name: ig_downloader
 description: Download Instagram photos, videos, Reels, and Stories via the share sheet.
 publish_to: 'none'
-version: 1.0.0+45
+version: 1.0.0+46
 
 environment:
   sdk: '>=3.3.0 <4.0.0'

@@ -152,15 +152,16 @@ class DownloaderService {
     }
 
     // ── Strategy A: embed captioned page ────────────────────────────────
+    // The /embed/captioned/ endpoint is a public iframe page — it is NOT
+    // designed to consume auth cookies. Sending sessionid causes Instagram to
+    // attempt a redirect to an "authenticated" variant. Without the full
+    // cookie suite (csrftoken, mid, ds_user_id …) the redirect never converges
+    // and Dio hits its maxRedirects limit. Fetch without any cookie; Strategy 0
+    // (private API) already covers authenticated access.
     try {
       final embedUrl = '${cleanUrl}embed/captioned/';
       debugPrint('[IG] Trying embed: $embedUrl');
-      final resp = await _dio.get<String>(
-        embedUrl,
-        options: cookieHeader != null
-            ? Options(headers: {'Cookie': cookieHeader})
-            : null,
-      );
+      final resp = await _dio.get<String>(embedUrl);
       if (resp.statusCode == 200 && resp.data != null) {
         final items = _parseEmbedPage(resp.data!, cleanUrl);
         if (items.isNotEmpty) {
@@ -174,16 +175,28 @@ class DownloaderService {
 
     // ── Strategy B: main page ─────────────────────────────────────────────
     debugPrint('[IG] Falling back to main page');
-    final resp = await _dio.get<String>(
-      cleanUrl,
-      options: cookieHeader != null
-          ? Options(headers: {'Cookie': cookieHeader})
-          : null,
-    );
-    if (resp.statusCode != 200 || resp.data == null) {
-      throw Exception('Failed to load Instagram page (${resp.statusCode})');
+    try {
+      final resp = await _dio.get<String>(
+        cleanUrl,
+        options: cookieHeader != null
+            ? Options(headers: {'Cookie': cookieHeader})
+            : null,
+      );
+      if (resp.statusCode != 200 || resp.data == null) {
+        throw Exception('Failed to load Instagram page (${resp.statusCode})');
+      }
+      return _parseMainPage(resp.data!, cleanUrl);
+    } catch (e) {
+      final msg = e.toString().toLowerCase();
+      if (msg.contains('redirect')) {
+        throw Exception(
+          'Instagram redirected to login — this post may be private or your '
+          'session has expired.\n'
+          'Try re-logging in from the Accounts tab.',
+        );
+      }
+      rethrow;
     }
-    return _parseMainPage(resp.data!, cleanUrl);
   }
 
   // ── Strategy 0: Instagram private API ──────────────────────────────────
