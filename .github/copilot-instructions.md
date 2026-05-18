@@ -87,6 +87,8 @@ require explicit vault paths in prompts.
 |---|---|
 | Web research, summaries, findings | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/research/YYYY-MM-DD-<slug>.md` |
 | WIP thinking, scratch, exploratory | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/drafts/<slug>.md` |
+| Bug fix — root cause, solution, prevention | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/fix/YYYY-MM-DD-<slug>.md` |
+| Feature implementation notes & decisions | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/implement/YYYY-MM-DD-<slug>.md` |
 | Persistent facts about this project | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/memory/projects/ig-image-downloader.md` |
 | Finished deliverables for human review | `/Users/daveli/git/obsidian-ai-collab-vault/review/inbox/YYYY-MM-DD-<slug>.md` |
 
