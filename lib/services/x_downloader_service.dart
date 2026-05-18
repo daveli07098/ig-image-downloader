@@ -21,6 +21,10 @@ class XDownloaderService {
             Dio(BaseOptions(
               connectTimeout: const Duration(seconds: 15),
               receiveTimeout: const Duration(seconds: 30),
+              // Accept any status code so we can read fxtwitter's JSON error
+              // body (e.g. 403 "private user", 404 "not found") and surface a
+              // meaningful message instead of a raw DioException.
+              validateStatus: (status) => status != null,
               headers: {
                 'User-Agent': 'Mozilla/5.0 (compatible; IgDownloader/2.0)',
                 'Accept': 'application/json',
