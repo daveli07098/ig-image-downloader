@@ -106,13 +106,8 @@ class _LoginScreenState extends State<LoginScreen> {
           setState(() => _loading = false);
           await _tryCaptureSession(url);
         },
-      ));
-    // Clear all WebView cookies before loading so stale challenge-context
-    // tokens from a previous (possibly corrupted) login attempt don't cause
-    // ERR_TOO_MANY_REDIRECTS on the next open.
-    WebViewCookieManager().clearCookies().then((_) {
-      _webController.loadRequest(Uri.parse(_cfg.loginUrl));
-    });
+      ))
+      ..loadRequest(Uri.parse(_cfg.loginUrl));
   }
 
   static const _cookieChannel = MethodChannel('ig_downloader/cookies');
