@@ -333,7 +333,7 @@ class _ErrorViewState extends State<_ErrorView> {
     _kind = _classifyError(widget.error);
     _totalCooldown = switch (_kind) {
       _ErrorKind.apiRateLimit => 300,
-      _ErrorKind.redirectLoop => 120,
+      _ErrorKind.redirectLoop => 60,
       _ErrorKind.generic      => 30,
     };
     _remaining = _totalCooldown;
@@ -382,8 +382,8 @@ class _ErrorViewState extends State<_ErrorView> {
       'Instagram limits private API calls to ~200 per hour per session. '
       'Waiting lets the hourly quota reset before retrying.',
     _ErrorKind.redirectLoop =>
-      'Instagram redirected more than 10 times — your session may have '
-      'expired. Try re-logging in from the Accounts tab, then retry.',
+      'Instagram hit the redirect limit (~200/hr API quota or expired session). '
+      'Wait, then retry — or re-login from the Accounts tab.',  
     _ErrorKind.generic => null,
   };
 
