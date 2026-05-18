@@ -117,6 +117,40 @@ class _LoginScreenState extends State<LoginScreen> {
           setState(() => _loading = false);
           await _tryCaptureSession(url);
         },
+        onWebResourceError: (error) {
+          // Catch ERR_TOO_MANY_REDIRECTS before Chrome shows its error page.
+          // IG's challenge page (update_risky_contactpoint) detects WebView
+          // via JS APIs and redirects to a new challenge each time, creating
+          // an 18-deep chain.  Stop the loop and guide the user.
+          if ((error.isForMainFrame ?? true) &&
+              (error.errorType == WebResourceErrorType.redirectLoop ||
+                  error.description.toLowerCase().contains('redirect'))) {
+            _webController.loadRequest(Uri.parse('about:blank'));
+            if (mounted) {
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (ctx) => AlertDialog(
+                  title: const Text('Instagram Security Check Required'),
+                  content: const Text(
+                    'Instagram needs you to verify your account, but this '
+                    'verification cannot complete inside the app browser.\n\n'
+                    'Please:\n'
+                    '1. Open Instagram in Chrome on this device\n'
+                    '2. Log in and complete the verification there\n'
+                    '3. Come back here and log in again',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(ctx),
+                      child: const Text('OK'),
+                    ),
+                  ],
+                ),
+              );
+            }
+          }
+        },
       ))
       ..loadRequest(Uri.parse(_cfg.loginUrl));
   }
