@@ -462,6 +462,52 @@ class FacebookDownloaderService {
       }
     }
 
+    // ── Auth-based carousel supplement ────────────────────────────────────────
+    // share/p/ and other share URL types sometimes deliver only 1 OG image
+    // even for multi-photo carousels, and mbasic may not always resolve all
+    // photos. When we have FB cookies and ≤1 image found so far on a non-video
+    // page, do an authenticated desktop Chrome fetch to extract carousel images
+    // from Facebook's React SPA JSON — it includes full_picture / uri for all
+    // carousel nodes.
+    if (!isVideoPage && allImages.length <= 1 && fbCookies != null) {
+      debugPrint('[FB] Only ${allImages.length} image(s); trying auth carousel extract');
+      try {
+        await Future.delayed(Duration(milliseconds: 300 + Random().nextInt(400)));
+        final carouselDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 15),
+          receiveTimeout: const Duration(seconds: 30),
+          followRedirects: true,
+          maxRedirects: 8,
+          headers: {
+            'User-Agent': _authUA,
+            'Cookie': fbCookies,
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'none',
+            'sec-fetch-user': '?1',
+            'sec-ch-ua':
+                '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"Windows"',
+            'Accept':
+                'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Upgrade-Insecure-Requests': '1',
+          },
+        ));
+        // Use the resolved canonical URL — share URLs redirect differently per UA.
+        final resolvedUrl =
+            finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
+        final carouselResp = await carouselDio.get<String>(resolvedUrl);
+        if (carouselResp.statusCode == 200 && carouselResp.data != null) {
+          _extractCarouselImagesFromJson(carouselResp.data!, allImages);
+          debugPrint('[FB] Auth carousel: ${allImages.length} images after extract');
+        }
+      } catch (e) {
+        debugPrint('[FB] Auth carousel extract failed: $e');
+      }
+    }
+
     debugPrint(
         '[FB] video: ${realVideoUrl != null}, images: ${allImages.length}, user: $username');
 

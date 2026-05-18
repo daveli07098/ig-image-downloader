@@ -28,7 +28,7 @@ class ThreadsDownloaderService {
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
           followRedirects: true,
-          maxRedirects: 5,
+          maxRedirects: 10,
           headers: {
             'User-Agent': _desktopUA,
             'Accept':
@@ -40,7 +40,7 @@ class ThreadsDownloaderService {
           connectTimeout: const Duration(seconds: 15),
           receiveTimeout: const Duration(seconds: 30),
           followRedirects: true,
-          maxRedirects: 5,
+          maxRedirects: 10,
           headers: {
             'User-Agent': _botUA,
             'Accept': 'text/html,*/*;q=0.8',
@@ -98,93 +98,124 @@ class ThreadsDownloaderService {
       }
     }
 
-    // Inject the best available session cookie into both Dio instances for the
-    // HTML scraping strategies below (may help in edge cases).
-    final bestSession = threadsSessionId ?? igSessionId;
-    if (bestSession != null) {
-      final cookieHeader = 'sessionid=$bestSession';
+    // Inject ONLY the Threads-domain session into Dio for HTML strategies.
+    // Using the Instagram-domain sessionid on threads.com triggers an auth
+    // redirect loop (Threads sees an invalid session and bounces back and forth).
+    // If we only have an IG session (no threads session), fetch without cookies;
+    // public Threads posts are accessible without auth from unauthenticated requests.
+    if (threadsSessionId != null) {
+      final cookieHeader = 'sessionid=$threadsSessionId';
       _desktopDio.options.headers['Cookie'] = cookieHeader;
       _botDio.options.headers['Cookie'] = cookieHeader;
+    } else {
+      _desktopDio.options.headers.remove('Cookie');
+      _botDio.options.headers.remove('Cookie');
     }
 
     // ── Strategy A: Desktop Chrome UA ────────────────────────────────────
+    // Try both threads.com and threads.net — Threads migrated domains and one
+    // may succeed while the other redirect-loops. Also try with the original
+    // URL (including query params like slof=1) if the clean URL loops.
     String? desktopHtml;
-    try {
-      final resp = await _desktopDio.get<String>(cleanUrl);
-      if (resp.statusCode == 200 && resp.data != null) {
-        desktopHtml = resp.data!;
+    final urlsToTry = [
+      cleanUrl,
+      if (cleanUrl.contains('threads.com'))
+        cleanUrl.replaceFirst('threads.com', 'threads.net')
+      else
+        cleanUrl.replaceFirst('threads.net', 'threads.com'),
+      // If query params were stripped, also try the original URL
+      if (url != cleanUrl) url,
+    ].toSet().toList();
 
-        // A1: __NEXT_DATA__ (Next.js SSR — full structured post data)
-        final nextItems = _parseNextData(desktopHtml, username);
-        if (nextItems.isNotEmpty) {
-          debugPrint('[Threads] __NEXT_DATA__: ${nextItems.length} items');
-          return nextItems;
+    for (final tryUrl in urlsToTry) {
+      try {
+        final resp = await _desktopDio.get<String>(tryUrl);
+        if (resp.statusCode == 200 && resp.data != null) {
+          desktopHtml = resp.data!;
+          debugPrint('[Threads] Desktop UA succeeded: $tryUrl');
+          break;
         }
-
-        // A2: CDN URL regex (Instagram CDN path prefixes)
-        final cdnItems = _parseCdnUrls(desktopHtml, username);
-        if (cdnItems.isNotEmpty) {
-          debugPrint('[Threads] CDN regex: ${cdnItems.length} items');
-          return cdnItems;
-        }
+      } catch (e) {
+        debugPrint('[Threads] Desktop UA failed ($tryUrl): $e');
       }
-    } catch (e) {
-      debugPrint('[Threads] Desktop UA failed: $e');
+    }
+
+    if (desktopHtml != null) {
+      // A1: __NEXT_DATA__ (Next.js SSR — full structured post data)
+      final nextItems = _parseNextData(desktopHtml, username);
+      if (nextItems.isNotEmpty) {
+        debugPrint('[Threads] __NEXT_DATA__: ${nextItems.length} items');
+        return nextItems;
+      }
+
+      // A2: CDN URL regex (Instagram CDN path prefixes)
+      final cdnItems = _parseCdnUrls(desktopHtml, username);
+      if (cdnItems.isNotEmpty) {
+        debugPrint('[Threads] CDN regex: ${cdnItems.length} items');
+        return cdnItems;
+      }
     }
 
     // ── Strategy B: facebookexternalhit → OG tags + embed URL fetch ───────
     // Threads sets og:video to an embed iframe URL (not a direct MP4).
     // We collect embed URLs separately and fetch them for the real video.
-    try {
-      final resp = await _botDio.get<String>(cleanUrl);
-      if (resp.statusCode == 200 && resp.data != null) {
-        final (:realVideos, :embedVideos, :images) =
-            _parseOgData(resp.data!);
-        debugPrint(
-            '[Threads] OG: ${realVideos.length} real, '
-            '${embedVideos.length} embed videos, ${images.length} images');
-
-        // Prefer a real (non-embed) video URL; fall back to fetching the embed
-        String? videoUrl =
-            realVideos.isNotEmpty ? realVideos.first : null;
-        if (videoUrl == null && embedVideos.isNotEmpty) {
-          videoUrl = await _fetchVideoFromEmbedUrl(embedVideos.first);
+    // Try threads.net as well if threads.com redirect-loops.
+    String? botHtml;
+    for (final tryUrl in urlsToTry) {
+      try {
+        final resp = await _botDio.get<String>(tryUrl);
+        if (resp.statusCode == 200 && resp.data != null) {
+          botHtml = resp.data!;
+          debugPrint('[Threads] Bot UA succeeded: $tryUrl');
+          break;
         }
+      } catch (e) {
+        debugPrint('[Threads] Bot UA failed ($tryUrl): $e');
+      }
+    }
+    if (botHtml != null) {
+      final (:realVideos, :embedVideos, :images) = _parseOgData(botHtml);
+      debugPrint(
+          '[Threads] OG: ${realVideos.length} real, '
+          '${embedVideos.length} embed videos, ${images.length} images');
 
-        final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
-        final items = <MediaItem>[];
+      // Prefer a real (non-embed) video URL; fall back to fetching the embed
+      String? videoUrl = realVideos.isNotEmpty ? realVideos.first : null;
+      if (videoUrl == null && embedVideos.isNotEmpty) {
+        videoUrl = await _fetchVideoFromEmbedUrl(embedVideos.first);
+      }
 
-        if (videoUrl != null) {
+      final now = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final items = <MediaItem>[];
+
+      if (videoUrl != null) {
+        items.add(MediaItem(
+          id: '0',
+          mediaUrl: videoUrl,
+          thumbnailUrl: images.isNotEmpty ? images.first : null,
+          type: MediaItemType.video,
+          username: username,
+          itemIndex: 1,
+          postTimestamp: now,
+        ));
+      } else {
+        for (var i = 0; i < images.length; i++) {
           items.add(MediaItem(
-            id: '0',
-            mediaUrl: videoUrl,
-            thumbnailUrl: images.isNotEmpty ? images.first : null,
-            type: MediaItemType.video,
+            id: '$i',
+            mediaUrl: images[i],
+            thumbnailUrl: images[i],
+            type: MediaItemType.image,
             username: username,
-            itemIndex: 1,
+            itemIndex: i + 1,
             postTimestamp: now,
           ));
-        } else {
-          for (var i = 0; i < images.length; i++) {
-            items.add(MediaItem(
-              id: '$i',
-              mediaUrl: images[i],
-              thumbnailUrl: images[i],
-              type: MediaItemType.image,
-              username: username,
-              itemIndex: i + 1,
-              postTimestamp: now,
-            ));
-          }
-        }
-
-        if (items.isNotEmpty) {
-          debugPrint('[Threads] OG+embed: ${items.length} items');
-          return items;
         }
       }
-    } catch (e) {
-      debugPrint('[Threads] Bot UA failed: $e');
+
+      if (items.isNotEmpty) {
+        debugPrint('[Threads] OG+embed: ${items.length} items');
+        return items;
+      }
     }
 
     if (igSessionId == null) {
@@ -520,17 +551,34 @@ class ThreadsDownloaderService {
       receiveTimeout: const Duration(seconds: 30),
       followRedirects: false,
       headers: {
-        'User-Agent': _desktopUA,
+        // Mobile UA is required — the threads.com and threads.net API endpoints
+        // use the same backend as i.instagram.com and reject desktop UAs.
+        'User-Agent': _mobileUA,
         'Cookie': 'sessionid=$sessionId',
+        'x-ig-app-id': _threadsAppId,
         'Accept': 'application/json',
         'Accept-Language': 'en-US,en;q=0.9',
       },
     ));
-    final resp = await apiDio.get<Map<String, dynamic>>(
-      'https://www.threads.com/api/v1/media/$mediaId/info/',
-    );
-    if (resp.statusCode != 200 || resp.data == null) return [];
-    return _parseApiResponse(resp.data!);
+    // Try both threads.com and threads.net — the migration between the two
+    // domains means one may return results while the other does not.
+    for (final domain in ['www.threads.com', 'www.threads.net']) {
+      try {
+        final resp = await apiDio.get<Map<String, dynamic>>(
+          'https://$domain/api/v1/media/$mediaId/info/',
+        );
+        if (resp.statusCode == 200 && resp.data != null) {
+          final items = _parseApiResponse(resp.data!);
+          if (items.isNotEmpty) {
+            debugPrint('[Threads] $domain API: ${items.length} items');
+            return items;
+          }
+        }
+      } on DioException catch (e) {
+        debugPrint('[Threads] $domain API (threads session) failed: ${e.response?.statusCode} ${e.message}');
+      }
+    }
+    return [];
   }
 
   List<MediaItem> _parseApiResponse(Map<String, dynamic> data) {
