@@ -100,6 +100,17 @@ class _LoginScreenState extends State<LoginScreen> {
     _cfg = _configs[widget.platform]!;
     _webController = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
+      // Android WebView includes "wv" in the User-Agent, which Instagram's
+      // security challenge page (update_risky_contactpoint) detects and
+      // immediately rejects by redirecting to a new challenge — which also
+      // detects "wv" — creating an 18-deep redirect chain that ends in
+      // ERR_TOO_MANY_REDIRECTS.  Use a real Chrome Mobile UA (no "wv") so
+      // Instagram treats the WebView as a regular Chrome browser session.
+      ..setUserAgent(
+        'Mozilla/5.0 (Linux; Android 14; SM-S9280) '
+        'AppleWebKit/537.36 (KHTML, like Gecko) '
+        'Chrome/136.0.0.0 Mobile Safari/537.36',
+      )
       ..setNavigationDelegate(NavigationDelegate(
         onPageStarted: (_) => setState(() => _loading = true),
         onPageFinished: (url) async {
