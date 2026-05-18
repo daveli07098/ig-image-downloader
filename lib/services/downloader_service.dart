@@ -44,6 +44,11 @@ class DownloaderService {
               BaseOptions(
                 connectTimeout: const Duration(seconds: 15),
                 receiveTimeout: const Duration(seconds: 60),
+                // Instagram embed pages chain up to 8 redirects (HTTPS upgrade,
+                // www normalisation, locale redirect, etc.). The Dio default of 5
+                // causes "Redirect limit exceeded" on the embed/captioned/ strategy.
+                followRedirects: true,
+                maxRedirects: 10,
                 headers: {
                   'User-Agent': _crawlerUA,
                   'Accept-Language': 'en-US,en;q=0.9',

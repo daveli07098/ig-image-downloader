@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../models/media_item.dart';
@@ -83,7 +84,10 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
       ),
       body: asyncItems.when(
         loading: () => const _LoadingView(),
-        error: (err, _) => _ErrorView(error: err.toString()),
+        error: (err, _) => _ErrorView(
+          error: err.toString(),
+          onRetry: () => ref.invalidate(_mediaItemsProvider(widget.igUrl)),
+        ),
         data: (items) {
           _initSelection(items);
           return Column(
@@ -299,13 +303,52 @@ class _LoadingView extends StatelessWidget {
   }
 }
 
-class _ErrorView extends StatelessWidget {
-  const _ErrorView({required this.error});
+class _ErrorView extends StatefulWidget {
+  const _ErrorView({required this.error, required this.onRetry});
   final String error;
+  final VoidCallback onRetry;
+
+  @override
+  State<_ErrorView> createState() => _ErrorViewState();
+}
+
+class _ErrorViewState extends State<_ErrorView> {
+  // Cooldown before the retry button becomes available.
+  // 60 s gives Instagram's rate-limiter time to reset between attempts.
+  static const _cooldownSeconds = 60;
+
+  late int _remaining;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _remaining = _cooldownSeconds;
+    _timer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted) return;
+      setState(() {
+        if (_remaining > 0) _remaining--;
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  // Show the rate-limit banner when the error looks like an API 400.
+  bool get _isRateLimitError {
+    final e = widget.error.toLowerCase();
+    return e.contains('400') || e.contains('rate') || e.contains('redirect limit');
+  }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final canRetry = _remaining == 0;
+
     return Center(
       child: Padding(
         padding: const EdgeInsets.all(24.0),
@@ -320,10 +363,76 @@ class _ErrorView extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             Text(
-              error,
+              widget.error,
               textAlign: TextAlign.center,
               style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
             ),
+
+            // ── Rate-limit info banner ───────────────────────────────────
+            if (_isRateLimitError) ...[
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: cs.errorContainer.withValues(alpha: 0.35),
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Icon(Icons.info_outline_rounded,
+                        size: 16, color: cs.onErrorContainer),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Instagram limits API requests to ~200 per hour per '
+                        'session. Waiting before retrying avoids further throttling.',
+                        style: TextStyle(
+                            fontSize: 12, color: cs.onErrorContainer),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+
+            const SizedBox(height: 24),
+
+            // ── Countdown ring → retry button ────────────────────────────
+            if (!canRetry) ...[
+              Stack(
+                alignment: Alignment.center,
+                children: [
+                  SizedBox(
+                    width: 72,
+                    height: 72,
+                    child: CircularProgressIndicator(
+                      value: _remaining / _cooldownSeconds,
+                      strokeWidth: 5,
+                      backgroundColor:
+                          cs.outline.withValues(alpha: 0.2),
+                    ),
+                  ),
+                  Text(
+                    '$_remaining',
+                    style: Theme.of(context).textTheme.titleLarge?.copyWith(
+                          fontWeight: FontWeight.w700,
+                        ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(
+                'Retry in $_remaining s',
+                style:
+                    TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+              ),
+            ] else
+              FilledButton.icon(
+                onPressed: widget.onRetry,
+                icon: const Icon(Icons.refresh_rounded),
+                label: const Text('Try again'),
+              ),
           ],
         ),
       ),
