@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -93,10 +92,7 @@ class _LoginScreenState extends State<LoginScreen> {
   bool _loading = true;
   bool _captured = false;
 
-  // Used to intercept onPageFinished during the threads.com session capture
-  // that runs after a successful IG login.
-  bool _threadsCapturePending = false;
-  Completer<void>? _threadsCaptureCompleter;
+
 
   @override
   void initState() {
@@ -108,20 +104,6 @@ class _LoginScreenState extends State<LoginScreen> {
         onPageStarted: (_) => setState(() => _loading = true),
         onPageFinished: (url) async {
           setState(() => _loading = false);
-          // After IG login, we navigate to threads.com to capture its session.
-          // Handle that navigation separately so it doesn't trigger IG session logic.
-          if (_threadsCapturePending) {
-            final isThreadsPage =
-                url.contains('threads.com') || url.contains('threads.net');
-            final isLoginPage = url.contains('accounts/login') ||
-                url.contains('/login/') ||
-                url.contains('/login?');
-            if (isThreadsPage && !isLoginPage) {
-              await _finishThreadsCapture();
-            }
-            // Don't run _tryCaptureSession while threads capture is in flight
-            return;
-          }
           await _tryCaptureSession(url);
         },
       ));
@@ -181,11 +163,31 @@ class _LoginScreenState extends State<LoginScreen> {
       } catch (e) {
         debugPrint('[Login/${_cfg.label}] username fetch failed: $e');
       }
-      // For Instagram: also navigate to threads.com to capture its session.
-      // Meta's cross-domain auth auto-logs the user into threads.com using the
-      // instagram.com cookies already set in Android's CookieManager.
+      // For Instagram: Meta's login flow sometimes sets threads.com cookies in
+      // Android's CookieManager as a side-effect (cross-domain auth). Try to
+      // read them directly — no WebView navigation, no risk of redirect loops.
       if (widget.platform == LoginPlatform.instagram) {
-        await _captureThreadsSession();
+        try {
+          final threadsCookies =
+              await _readRawCookiesFromNative('https://www.threads.com');
+          if (threadsCookies != null && threadsCookies.isNotEmpty) {
+            for (final part in threadsCookies.split(';')) {
+              final kv = part.trim().split('=');
+              if (kv.length >= 2 && kv[0].trim() == 'sessionid') {
+                final ts = kv.sublist(1).join('=').trim();
+                if (ts.isNotEmpty) {
+                  await SessionService.saveThreadsSessionId(ts);
+                  debugPrint('[Login/IG] Threads session captured from existing cookies');
+                }
+                break;
+              }
+            }
+          } else {
+            debugPrint('[Login/IG] Threads session: no cookies found (skipping)');
+          }
+        } catch (e) {
+          debugPrint('[Login/IG] Threads cookie check failed: $e');
+        }
       }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -197,54 +199,11 @@ class _LoginScreenState extends State<LoginScreen> {
   }
 
   // ── Threads session capture (runs after IG login) ──────────────────────
-
-  /// Navigates the WebView to threads.com so Meta's cross-domain auth flow runs
-  /// and sets a threads.com-domain sessionid in Android's CookieManager.
-  /// Waits for the page to finish loading (or times out after 10 s).
-  Future<void> _captureThreadsSession() async {
-    try {
-      _threadsCaptureCompleter = Completer<void>();
-      _threadsCapturePending = true;
-      await _webController.loadRequest(Uri.parse('https://www.threads.com/'));
-      await _threadsCaptureCompleter!.future
-          .timeout(const Duration(seconds: 10), onTimeout: () {
-        debugPrint('[Login/IG] Threads capture timed out');
-        _threadsCapturePending = false;
-      });
-    } catch (e) {
-      debugPrint('[Login/IG] Threads capture error: $e');
-      _threadsCapturePending = false;
-    }
-  }
-
-  /// Called from the navigation delegate when threads.com finishes loading.
-  /// Reads the threads.com sessionid from Android's CookieManager and saves it.
-  Future<void> _finishThreadsCapture() async {
-    _threadsCapturePending = false;
-    try {
-      final rawCookies =
-          await _readRawCookiesFromNative('https://www.threads.com');
-      if (rawCookies != null && rawCookies.isNotEmpty) {
-        for (final part in rawCookies.split(';')) {
-          final kv = part.trim().split('=');
-          if (kv.length >= 2 && kv[0].trim() == 'sessionid') {
-            final ts = kv.sublist(1).join('=').trim();
-            if (ts.isNotEmpty) {
-              await SessionService.saveThreadsSessionId(ts);
-              debugPrint('[Login/IG] Threads session: captured');
-            }
-            break;
-          }
-        }
-      } else {
-        debugPrint('[Login/IG] Threads session: no cookies found');
-      }
-    } catch (e) {
-      debugPrint('[Login/IG] Threads session capture failed: $e');
-    } finally {
-      _threadsCaptureCompleter?.complete();
-    }
-  }
+  // Threads session is read directly from Android's CookieManager after IG
+  // login completes. Meta's auth flow sometimes sets threads.com cookies as a
+  // side-effect. We do NOT navigate the WebView to threads.com — that causes
+  // cross-domain auth redirects back through instagram.com which can collide
+  // with any pending IG security challenge and trigger ERR_TOO_MANY_REDIRECTS.
 
   // ── Username resolution ────────────────────────────────────────────────
 
