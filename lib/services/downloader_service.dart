@@ -168,20 +168,25 @@ class DownloaderService {
       );
     }
 
-    // ── Strategy A: embed captioned page (desktop Chrome UA, no cookie) ──
-    // The /embed/captioned/ endpoint is a public browser-facing iframe. We use
-    // a desktop Chrome UA (not facebookexternalhit) because IG now redirects
-    // bot UAs on this endpoint. No cookie is sent — Strategy 0 already covers
-    // authenticated access, and sending sessionid here triggers a redirect loop.
+    // ── Strategy A: embed captioned page ─────────────────────────────────
+    // /embed/captioned/ is a public iframe endpoint — no cookie sent (cookie
+    // triggers auth redirect loop). Try desktop Chrome UA first (most likely
+    // to get __additionalDataLoaded JSON), then facebookexternalhit as fallback.
     try {
       final embedUrl = '${cleanUrl}embed/captioned/';
       debugPrint('[IG] Trying embed: $embedUrl');
-      final resp = await _desktopDio.get<String>(embedUrl);
-      if (resp.statusCode == 200 && resp.data != null) {
-        final items = _parseEmbedPage(resp.data!, cleanUrl);
-        if (items.isNotEmpty) {
-          debugPrint('[IG] Embed succeeded: ${items.length} items');
-          return items;
+      for (final embedDio in [_desktopDio, _dio]) {
+        try {
+          final resp = await embedDio.get<String>(embedUrl);
+          if (resp.statusCode == 200 && resp.data != null) {
+            final items = _parseEmbedPage(resp.data!, cleanUrl);
+            if (items.isNotEmpty) {
+              debugPrint('[IG] Embed succeeded: ${items.length} items');
+              return items;
+            }
+          }
+        } catch (e) {
+          debugPrint('[IG] Embed attempt failed: $e');
         }
       }
     } catch (e) {
@@ -291,21 +296,50 @@ class DownloaderService {
     );
   }
 
+  /// Extracts the balanced JSON object starting at [start] in [text].
+  /// Uses a brace-counter rather than a regex so nested objects don't confuse
+  /// the parser — the regex `\{.+?\}` (non-greedy) stops at the first inner
+  /// closing brace, which breaks JSON extraction for complex carousel responses.
+  static String? _extractBalancedJson(String text, int start) {
+    var depth = 0;
+    for (var i = start; i < text.length; i++) {
+      if (text[i] == '{') {
+        depth++;
+      } else if (text[i] == '}') {
+        depth--;
+        if (depth == 0) return text.substring(start, i + 1);
+      }
+    }
+    return null;
+  }
+
   List<MediaItem> _parseEmbedPage(String html, String pageUrl) {
     // window.__additionalDataLoaded('extra', {...});
-    final re = RegExp(
-      r'window\.__additionalDataLoaded\s*\(\s*[^,]+,\s*(\{.+?\})\s*\)\s*;',
+    // We locate the opening { of the JSON argument, then use balanced-brace
+    // extraction to capture the full object regardless of nesting depth.
+    final callRe = RegExp(
+      r'window\.__additionalDataLoaded\s*\(\s*[^,]+,\s*',
       dotAll: true,
     );
-    final match = re.firstMatch(html);
-    if (match == null) {
+    final callMatch = callRe.firstMatch(html);
+    if (callMatch == null) {
       debugPrint('[IG] No __additionalDataLoaded found in embed page');
+      return [];
+    }
+    final jsonStart = html.indexOf('{', callMatch.end);
+    if (jsonStart < 0) {
+      debugPrint('[IG] No JSON object after __additionalDataLoaded');
+      return [];
+    }
+    final jsonStr = _extractBalancedJson(html, jsonStart);
+    if (jsonStr == null) {
+      debugPrint('[IG] Could not balance braces in embed JSON');
       return [];
     }
 
     Map<String, dynamic> data;
     try {
-      data = jsonDecode(match.group(1)!) as Map<String, dynamic>;
+      data = jsonDecode(jsonStr) as Map<String, dynamic>;
     } catch (e) {
       debugPrint('[IG] JSON parse error: $e');
       return [];

@@ -78,6 +78,36 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
       if (sessionId == null) return null;
+
+      // Primary: i.instagram.com private API — most reliable, doesn't require
+      // additional cookies beyond sessionid.
+      try {
+        final apiDio = Dio(BaseOptions(
+          connectTimeout: const Duration(seconds: 10),
+          receiveTimeout: const Duration(seconds: 10),
+          headers: {
+            'User-Agent':
+                'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; '
+                'OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)',
+            'X-IG-App-ID': '936619743392459',
+            'Cookie': 'sessionid=$sessionId',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US',
+          },
+        ));
+        final resp = await apiDio.get<dynamic>(
+            'https://i.instagram.com/api/v1/accounts/current_user/');
+        final username =
+            (resp.data as Map?)?['user']?['username'] as String?;
+        if (username != null && username.isNotEmpty) {
+          debugPrint('[Home] IG resolve via private API => $username');
+          return username;
+        }
+      } catch (e) {
+        debugPrint('[Home] IG private API resolve failed: $e');
+      }
+
+      // Fallback: HTML scraping of instagram.com
       final dio = Dio(BaseOptions(
         connectTimeout: const Duration(seconds: 15),
         receiveTimeout: const Duration(seconds: 15),
@@ -384,7 +414,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.0.50',
+                    'v1.0.0.51',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
