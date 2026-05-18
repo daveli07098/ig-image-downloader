@@ -305,7 +305,9 @@ class _LoadingView extends StatelessWidget {
 
 /// Classifies a raw error string into a handling tier so the UI can show
 /// the right indicator, banner text, and cooldown duration for each case.
-enum _ErrorKind { apiRateLimit, redirectLoop, generic }
+/// loginRequired = our custom "redirected to login" throw (session/private post)
+/// redirectLoop  = Dio's 10-hop RedirectException
+enum _ErrorKind { apiRateLimit, loginRequired, redirectLoop, generic }
 
 class _ErrorView extends StatefulWidget {
   const _ErrorView({required this.error, required this.onRetry});
@@ -320,9 +322,10 @@ class _ErrorViewState extends State<_ErrorView> {
   late final _ErrorKind _kind;
 
   // Cooldown seconds before the retry button appears. Tuned per error kind:
-  //   apiRateLimit → 5 min  (IG hourly quota needs breathing room)
-  //   redirectLoop → 2 min  (session likely expired; re-login may be needed)
-  //   generic      → 30 s   (transient error; quick retry is fine)
+  //   apiRateLimit  → 5 min  (IG hourly quota needs breathing room)
+  //   loginRequired → 30 s   (user must re-login; no point waiting longer)
+  //   redirectLoop  → 60 s   (true Dio 10-hop; transient server issue)
+  //   generic       → 30 s   (transient error; quick retry is fine)
   late final int _totalCooldown;
   late int _remaining;
   Timer? _timer;
@@ -332,9 +335,10 @@ class _ErrorViewState extends State<_ErrorView> {
     super.initState();
     _kind = _classifyError(widget.error);
     _totalCooldown = switch (_kind) {
-      _ErrorKind.apiRateLimit => 300,
-      _ErrorKind.redirectLoop => 120,
-      _ErrorKind.generic      => 30,
+      _ErrorKind.apiRateLimit  => 300,
+      _ErrorKind.loginRequired => 30,
+      _ErrorKind.redirectLoop  => 60,
+      _ErrorKind.generic       => 30,
     };
     _remaining = _totalCooldown;
     _timer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -352,10 +356,13 @@ class _ErrorViewState extends State<_ErrorView> {
   }
 
   /// Maps an error string to its handling tier.
-  /// "Redirect limit exceeded" = our internal 10-hop Dio limit, NOT an API
-  /// rate limit — treat it as a session/redirect-loop issue separately.
+  /// Check the more-specific "redirected to login" phrase BEFORE the generic
+  /// "redirect" check, so our custom throw and Dio's exception are distinct.
   static _ErrorKind _classifyError(String error) {
     final e = error.toLowerCase();
+    if (e.contains('redirected to login') || e.contains('session has expired')) {
+      return _ErrorKind.loginRequired;
+    }
     if (e.contains('redirect')) return _ErrorKind.redirectLoop;
     if (e.contains('429') ||
         e.contains('rate') ||
@@ -366,24 +373,29 @@ class _ErrorViewState extends State<_ErrorView> {
   }
 
   String get _kindLabel => switch (_kind) {
-    _ErrorKind.apiRateLimit => 'IG API rate limit (~200/hr)',
-    _ErrorKind.redirectLoop => 'Redirect loop (10-hop limit)',
-    _ErrorKind.generic      => 'Download error',
+    _ErrorKind.apiRateLimit  => 'IG API rate limit (~200/hr)',
+    _ErrorKind.loginRequired => 'Login required',
+    _ErrorKind.redirectLoop  => 'Redirect loop (10-hop limit)',
+    _ErrorKind.generic       => 'Download error',
   };
 
   IconData get _kindIcon => switch (_kind) {
-    _ErrorKind.apiRateLimit => Icons.timer_outlined,
-    _ErrorKind.redirectLoop => Icons.sync_problem_rounded,
-    _ErrorKind.generic      => Icons.error_outline_rounded,
+    _ErrorKind.apiRateLimit  => Icons.timer_outlined,
+    _ErrorKind.loginRequired => Icons.lock_outline_rounded,
+    _ErrorKind.redirectLoop  => Icons.sync_problem_rounded,
+    _ErrorKind.generic       => Icons.error_outline_rounded,
   };
 
   String? get _bannerText => switch (_kind) {
     _ErrorKind.apiRateLimit =>
       'Instagram limits private API calls to ~200 per hour per session. '
       'Waiting lets the hourly quota reset before retrying.',
+    _ErrorKind.loginRequired =>
+      'This post may be private, or your Instagram session has expired. '
+      'Re-login from the Accounts tab and try again.',
     _ErrorKind.redirectLoop =>
-      'Instagram redirected more than 10 times — your session may have '
-      'expired. Try re-logging in from the Accounts tab, then retry.',
+      'The request hit Instagram\'s 10-redirect limit — likely a temporary '
+      'server issue. Retry in a moment.',
     _ErrorKind.generic => null,
   };
 
