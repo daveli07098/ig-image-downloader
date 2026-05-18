@@ -33,7 +33,21 @@ const _configs = {
     loginUrl: 'https://www.instagram.com/accounts/login/',
     cookieDomain: 'https://www.instagram.com',
     cookieName: 'sessionid',
-    loginFlowPatterns: ['/accounts/login/', '/accounts/emailsignup/'],
+    loginFlowPatterns: [
+      '/accounts/login/',
+      '/accounts/emailsignup/',
+      '/accounts/onetap/',          // "Save login info" interstitial
+      '/accounts/password/',        // Password reset flow
+      '/accounts/suspended',        // Suspended account page
+      '/accounts/integrity',        // Integrity check
+      '/accounts/update_risky',     // "Update risky contact point" challenge
+      '/accounts/seamless_login',   // Seamless login redirect
+      '/challenge/',                // Generic security challenge
+      'challenge_context',          // Challenge context URL param
+      '/two_factor',                // 2FA entry
+      '/verify/',                   // Verification steps
+      'security_check',             // Security check page
+    ],
   ),
   LoginPlatform.x: _PlatformConfig(
     label: 'X (Twitter)',
