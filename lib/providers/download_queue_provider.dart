@@ -71,6 +71,9 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   @override
   void dispose() {
     _connectivitySub?.cancel();
+    // Persist current state synchronously-safe wrapper so in-flight status
+    // changes (downloading → pending) are saved before the isolate exits.
+    _persistJobs();
     super.dispose();
   }
 
@@ -147,7 +150,12 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
       final toRetry = <String>[];
       final loaded = (jsonDecode(raw) as List)
           .map((e) => DownloadJob.fromJson(Map<String, dynamic>.from(e as Map)))
-          .where((j) => j.createdAt.isAfter(cutoff))
+          // Pending/downloading jobs are always kept regardless of age —
+          // only finished (done/error) jobs are pruned after 1 hour.
+          .where((j) =>
+              j.status == JobStatus.pending ||
+              j.status == JobStatus.downloading ||
+              j.createdAt.isAfter(cutoff))
           // Skip jobs already in state (e.g. process wasn't killed)
           .where((j) => !existingIds.contains(j.id))
           .map((j) {
@@ -195,9 +203,13 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
       await _run(jobId);
 
-      // Pause between downloads — random 3–10 s to reduce rate-limiting risk
+      // Human-like pause between downloads to avoid IG rate-limiting.
+      // Base: 10–30 s. 15% chance of a longer 35–70 s "thinking" pause.
       if (_pendingIds.isNotEmpty) {
-        final pauseMs = 3000 + _random.nextInt(7000);
+        final isLongPause = _random.nextDouble() < 0.15;
+        final pauseMs = isLongPause
+            ? 35000 + _random.nextInt(35000)  // 35–70 s
+            : 10000 + _random.nextInt(20000); // 10–30 s
         await Future.delayed(Duration(milliseconds: pauseMs));
       }
     }
@@ -236,7 +248,13 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
       }
     }
 
+    // Small human-like jitter (0.5–3 s) before the actual request so back-to-
+    // back retries and the very first download don't look like instant automation.
+    await Future.delayed(
+        Duration(milliseconds: 500 + _random.nextInt(2500)));
+
     _updateJob(jobId, (j) => j.copyWith(status: JobStatus.downloading));
+    _persistJobs(); // snapshot downloading→pending so restart can recover it
 
     final job = state.firstWhere((j) => j.id == jobId);
     final service = DownloaderService();
