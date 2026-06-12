@@ -15,6 +15,7 @@
 
 ### Maintenance
 - chore: bump to v1.0.1.0 — build counter now resets to 0 on each minor/sub-version bump
+- chore(android): derive a monotonic versionCode from semver in `build.gradle.kts` so the resettable display counter never blocks installs as a downgrade
 
 ## [2026-05-29] — Session: Facebook login + IG session reuse for Threads
 

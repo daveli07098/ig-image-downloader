@@ -8,10 +8,10 @@
 # a plain build bump and RESETS to 0 whenever PATCH/MINOR/MAJOR changes — so a
 # new sub-version always starts counting from .0 again.
 #
-# NOTE: BUILD is also the Android versionCode. Resetting it means a new
-# sub-version installs as a versionCode "downgrade", so sideload installs use
-# `adb install -r -d` (the -d below allows it). This is fine for local/dev
-# distribution but would need a monotonic versionCode for the Play Store.
+# NOTE: BUILD can reset freely because the Android versionCode is NOT taken
+# from it directly — android/app/build.gradle.kts derives a strictly-increasing
+# versionCode from the full semver (major*10M + minor*100k + patch*1k + BUILD).
+# So resetting the display counter never causes an install "downgrade".
 #
 # Usage (from repo root):
 #   ./scripts/bump-build.sh                 # +1 BUILD          (1.0.1+3 → 1.0.1+4)

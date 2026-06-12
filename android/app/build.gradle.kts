@@ -26,8 +26,19 @@ android {
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
-        versionCode = flutter.versionCode
         versionName = flutter.versionName
+
+        // The pubspec build counter (the "+N" / 4th display segment) resets to 0
+        // on each minor/sub-version bump, so it can't be used as the Android
+        // versionCode directly — installs would be rejected as downgrades. Derive
+        // a strictly-increasing versionCode from the full semver instead:
+        //   major*10_000_000 + minor*100_000 + patch*1_000 + buildCounter
+        // e.g. 1.0.1+0 -> 10_001_000, 1.0.2+0 -> 10_002_000, 1.1.0+0 -> 10_100_000.
+        val v = (flutter.versionName ?: "0.0.0").split(".")
+        val major = v.getOrNull(0)?.toIntOrNull() ?: 0
+        val minor = v.getOrNull(1)?.toIntOrNull() ?: 0
+        val patch = v.getOrNull(2)?.toIntOrNull() ?: 0
+        versionCode = major * 10_000_000 + minor * 100_000 + patch * 1_000 + flutter.versionCode
     }
 
     buildTypes {
