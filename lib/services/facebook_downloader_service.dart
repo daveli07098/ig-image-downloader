@@ -515,13 +515,26 @@ class FacebookDownloaderService {
             finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
         final carouselResp = await carouselDio.get<String>(resolvedUrl);
         if (carouselResp.statusCode == 200 && carouselResp.data != null) {
-          // Use the first confirmed image's _nc_cat CDN bucket as a fingerprint
-          // to filter out images from unrelated posts on the same page.
+          final before = allImages.length;
+          // Strict pass first: prefer images sharing the reference image's
+          // _nc_cat CDN bucket, which filters out unrelated posts on the page.
           final refNcCat = allImages.isNotEmpty
               ? _extractNcCat(allImages.first)
               : null;
           _extractCarouselImagesFromJson(
               carouselResp.data!, allImages, refNcCat: refNcCat);
+
+          // Relaxed fallback: _nc_cat is a per-image CDN edge bucket, NOT a
+          // reliable album identifier — sibling photos in the same album are
+          // often served from different buckets and the strict pass drops them,
+          // collapsing a multi-photo post to just its cover. If the strict pass
+          // recovered nothing new, rescan without the bucket filter so the rest
+          // of the album is captured (the path already targets the canonical
+          // post permalink, so unrelated images are unlikely here).
+          if (refNcCat != null && allImages.length == before) {
+            debugPrint('[FB] Auth carousel: strict _nc_cat pass found nothing new — relaxing filter');
+            _extractCarouselImagesFromJson(carouselResp.data!, allImages);
+          }
           debugPrint('[FB] Auth carousel: ${allImages.length} images after extract');
         }
       } catch (e) {
