@@ -7,6 +7,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
 import '../models/download_job.dart';
+import '../services/download_foreground_service.dart';
 import '../services/downloader_service.dart';
 import '../services/facebook_downloader_service.dart';
 import '../services/ig_url_parser.dart';
@@ -36,6 +37,10 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   }
 
   static const _prefsKey = 'job_queue_v2';
+
+  /// How many finished (done/error) jobs to retain as history. The most
+  /// recent N are always kept regardless of age; older ones are auto-pruned.
+  static const _maxFinishedHistory = 10;
 
   final Ref _ref;
   final _random = Random();
@@ -71,6 +76,8 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   @override
   void dispose() {
     _connectivitySub?.cancel();
+    // Tear down the foreground service if it's still up (fire-and-forget).
+    DownloadForegroundService.stop();
     // Persist current state synchronously-safe wrapper so in-flight status
     // changes (downloading → pending) are saved before the isolate exits.
     _persistJobs();
@@ -108,15 +115,23 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     _startWorker();
   }
 
-  /// Keeps the queue tidy: finished (done/error) jobs older than 1 hour are
-  /// removed. Active (pending/downloading) jobs are never pruned.
+  /// Keeps the queue tidy: only the most recent [_maxFinishedHistory] finished
+  /// (done/error) jobs are retained as history. Active (pending/downloading)
+  /// jobs are never pruned, so the queue can hold more than the history cap
+  /// while downloads are in flight.
   void _pruneFinished() {
-    final cutoff = DateTime.now().subtract(const Duration(hours: 1));
+    final keep = state
+        .where((j) => j.status == JobStatus.done || j.status == JobStatus.error)
+        .toList()
+      // newest first, then keep the top N
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final keepIds = keep.take(_maxFinishedHistory).map((j) => j.id).toSet();
+
     state = state.where((j) {
       if (j.status == JobStatus.pending || j.status == JobStatus.downloading) {
         return true;
       }
-      return j.createdAt.isAfter(cutoff);
+      return keepIds.contains(j.id);
     }).toList();
     _persistJobs();
   }
@@ -145,18 +160,12 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
       final prefs = await SharedPreferences.getInstance();
       final raw = prefs.getString(_prefsKey);
       if (raw == null || raw.isEmpty) return;
-      final cutoff = DateTime.now().subtract(const Duration(hours: 1));
       final existingIds = state.map((j) => j.id).toSet();
       final toRetry = <String>[];
       final loaded = (jsonDecode(raw) as List)
           .map((e) => DownloadJob.fromJson(Map<String, dynamic>.from(e as Map)))
-          // Pending/downloading jobs are always kept regardless of age —
-          // only finished (done/error) jobs are pruned after 1 hour.
-          .where((j) =>
-              j.status == JobStatus.pending ||
-              j.status == JobStatus.downloading ||
-              j.createdAt.isAfter(cutoff))
-          // Skip jobs already in state (e.g. process wasn't killed)
+          // Skip jobs already in state (e.g. process wasn't killed). Finished
+          // jobs are trimmed to the history cap by _pruneFinished() below.
           .where((j) => !existingIds.contains(j.id))
           .map((j) {
             // Auto-retry interrupted pending/downloading jobs — no user tap needed
@@ -170,6 +179,7 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
           .toList();
       if (loaded.isNotEmpty) {
         state = [...loaded, ...state];
+        _pruneFinished(); // trim restored finished history to the cap
         if (toRetry.isNotEmpty) {
           _pendingIds.insertAll(0, toRetry);
           _startWorker();
@@ -196,10 +206,22 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
   /// Processes pending jobs one at a time with a pause between each.
   Future<void> _runNext() async {
+    // Start a foreground service so Android keeps the process alive (and its
+    // network un-throttled) while the queue drains, even when backgrounded.
+    await DownloadForegroundService.start(
+      title: 'IG Downloader',
+      text: _progressText(),
+    );
+
     while (_pendingIds.isNotEmpty) {
       final jobId = _pendingIds.removeAt(0);
       // Job may have been removed from state while queued
       if (!state.any((j) => j.id == jobId)) continue;
+
+      await DownloadForegroundService.update(
+        title: 'IG Downloader',
+        text: _progressText(),
+      );
 
       await _run(jobId);
 
@@ -214,6 +236,18 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
       }
     }
     _isRunning = false;
+    // Queue drained — tear down the foreground service / notification.
+    await DownloadForegroundService.stop();
+  }
+
+  /// Notification body text: how many jobs are still queued / downloading.
+  String _progressText() {
+    final remaining = state
+        .where((j) =>
+            j.status == JobStatus.pending || j.status == JobStatus.downloading)
+        .length;
+    if (remaining <= 1) return 'Downloading 1 item…';
+    return 'Downloading — $remaining items left';
   }
 
   void remove(String jobId) {

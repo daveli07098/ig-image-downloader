@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/download_job.dart';
 import '../services/storage_service.dart';
 
@@ -55,7 +56,10 @@ class DownloadJobTile extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(width: 8),
+                const SizedBox(width: 4),
+
+                // Jump back to the original post (IG / X / Facebook)
+                _OpenPostButton(url: job.url),
 
                 // Actions
                 _ActionButton(job: job, onRetry: onRetry, onRemove: onRemove),
@@ -211,6 +215,41 @@ class _StatusText extends StatelessWidget {
           Text('Failed', style: TextStyle(fontSize: 12, color: cs.error)),
         ]),
     };
+  }
+}
+
+// ── Open original post button ─────────────────────────────────────────────────
+
+class _OpenPostButton extends StatelessWidget {
+  const _OpenPostButton({required this.url});
+  final String url;
+
+  Future<void> _open(BuildContext context) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Invalid link')),
+      );
+      return;
+    }
+    // externalApplication opens the native IG/X/FB app when installed,
+    // otherwise falls back to the default browser.
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok) {
+      messenger.showSnackBar(
+        const SnackBar(content: Text("Couldn't open the original link")),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return IconButton(
+      icon: const Icon(Icons.open_in_new_rounded),
+      onPressed: () => _open(context),
+      tooltip: 'Open original post',
+    );
   }
 }
 

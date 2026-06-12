@@ -19,6 +19,12 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
 
+    <!-- Foreground service so downloads keep running when backgrounded.
+         FOREGROUND_SERVICE + POST_NOTIFICATIONS are merged in by the
+         flutter_foreground_task plugin; the typed permission below is required
+         on Android 14+ (API 34) to match the dataSync service type. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
+
     <application
         android:label="IG Downloader"
         android:name="${applicationName}"
@@ -26,10 +32,18 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true">
 
+        <!--
+          singleTask (not singleTop): every share from Instagram/X/Facebook is
+          routed to the SAME existing task instead of spawning a new one. This
+          stops the Recents screen from filling up with many duplicate IG
+          Downloader cards when the app is minimised and re-shared to.
+          receive_sharing_intent delivers re-shares via onNewIntent.
+        -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:launchMode="singleTop"
+            android:launchMode="singleTask"
+            android:taskAffinity=""
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
@@ -56,6 +70,15 @@
             </intent-filter>
 
         </activity>
+
+        <!-- Foreground service that keeps the download queue alive in the
+             background (flutter_foreground_task). dataSync type matches the
+             FOREGROUND_SERVICE_DATA_SYNC permission declared above. -->
+        <service
+            android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
+            android:foregroundServiceType="dataSync"
+            android:exported="false"
+            android:stopWithTask="false"/>
 
         <!-- Don't delete the FlutterActivity meta-data -->
         <meta-data

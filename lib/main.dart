@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app.dart';
 import 'services/dev_logger.dart';
@@ -12,6 +13,10 @@ const _devMode =
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // Set up the isolate communication port used by the download foreground
+  // service. Must run before any startService/updateService call.
+  FlutterForegroundTask.initCommunicationPort();
 
   // In dev mode (debug or --dart-define=DEV_MODE=true), intercept debugPrint
   // so every log line appears in the in-app DevLogOverlay as well as logcat.

@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026-06-13] — Session: v1.0.1 big upgrade (icon, history, background downloads)
+
+### Added
+- feat(icon): new app icon — Instagram-style gradient + white download glyph; full Android adaptive + iOS icon set generated via `flutter_launcher_icons` (source art + `scripts/gen_icon.py`)
+- feat(ui): "Open original post" button on each download tile — jumps back to the original IG/X/Facebook link in its native app (browser fallback) via `url_launcher`
+- feat(download): foreground service (`flutter_foreground_task`) keeps the download queue running with a persistent "Downloading…" notification when the app is backgrounded
+
+### Changed
+- feat(history): history now keeps the most recent 10 finished (done/error) jobs regardless of age, instead of pruning everything older than 1 hour
+
+### Fixed
+- fix(android): `MainActivity` launch mode `singleTop` → `singleTask` (+ empty `taskAffinity`) so re-shares no longer pile up duplicate app cards in the Recents screen
+
+### Maintenance
+- chore: bump to v1.0.1.0 — build counter now resets to 0 on each minor/sub-version bump
+
 ## [2026-05-29] — Session: Facebook login + IG session reuse for Threads
 
 ### Added

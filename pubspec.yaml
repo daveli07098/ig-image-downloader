@@ -1,7 +1,7 @@
 name: ig_downloader
 description: Download Instagram photos, videos, Reels, and Stories via the share sheet.
 publish_to: 'none'
-version: 1.0.0+61
+version: 1.0.1+0
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
@@ -50,10 +50,31 @@ dependencies:
   # UI extras
   flutter_svg: ^2.0.10+1
 
+  # Open the original post URL in the native IG/X/FB app (or browser)
+  url_launcher: ^6.3.1
+
+  # Foreground service so downloads keep running when the app is backgrounded
+  flutter_foreground_task: ^8.17.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+
+  # Generates Android (adaptive) + iOS launcher icons from assets/icon/*
+  flutter_launcher_icons: ^0.14.3
+
+# ── Launcher icon generation ──────────────────────────────────────────────────
+# Source art lives in assets/icon/ and is produced by scripts/gen_icon.py.
+# Run:  fvm flutter pub run flutter_launcher_icons
+flutter_launcher_icons:
+  image_path: "assets/icon/ic_full.png"
+  android: true
+  ios: true
+  remove_alpha_ios: true
+  # Android 8.0+ adaptive icon (separate background gradient + white foreground glyph)
+  adaptive_icon_background: "assets/icon/ic_bg.png"
+  adaptive_icon_foreground: "assets/icon/ic_fg.png"
 
 flutter:
   uses-material-design: true
