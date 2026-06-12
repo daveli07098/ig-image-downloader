@@ -358,7 +358,12 @@ class FacebookDownloaderService {
     // (e.g. a /posts/ view) so we cannot trust Phase 2 to be complete; the
     // auth carousel supplement is then triggered regardless of image count.
     var phase1Count = 0;
-    if (!isVideoPage) {
+    // Run photo extraction for genuine photo pages AND for "video" pages where
+    // no real video URL was found: Facebook mislabels many multi-photo albums
+    // as og:type=video.other, which sets isVideoPage but yields no MP4 — those
+    // are actually photo albums and must go through the carousel extractor.
+    final treatAsPhotoPage = !isVideoPage || realVideoUrl == null;
+    if (treatAsPhotoPage) {
       try {
         // Build mbasic URL. For photo pages keep fbid/set (identify the album);
         // for all other pages use just the path — tracking params (rdid,
@@ -482,7 +487,7 @@ class FacebookDownloaderService {
     //
     // The call passes the first confirmed image's _nc_cat CDN bucket ID so the
     // extractor only accepts images in the same bucket (same post/album).
-    final needsAuthCarousel = !isVideoPage && fbCookies != null &&
+    final needsAuthCarousel = treatAsPhotoPage && fbCookies != null &&
         (phase1Count == 0 || allImages.length < 5);
     if (needsAuthCarousel) {
       debugPrint('[FB] phase1=$phase1Count imgs=${allImages.length}; trying auth carousel extract');
