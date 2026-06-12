@@ -351,36 +351,42 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => _AccountsSheet(
-        igLoggedIn: _igLoggedIn,
-        xLoggedIn: _xLoggedIn,
-        fbLoggedIn: _fbLoggedIn,
-        igUsername: _igUsername,
-        xUsername: _xUsername,
-        fbUsername: _fbUsername,
-        onLogin: (platform) async {
-          final nav = Navigator.of(context);
-          nav.pop();
-          final result = await nav.push<bool>(
-            MaterialPageRoute(
-              builder: (_) => LoginScreen(platform: platform),
-            ),
-          );
-          if (result == true) _refreshLoginState();
-        },
-        onLogout: (platform) async {
-          final messenger = ScaffoldMessenger.of(context);
-          await SessionService.clearSession(platform);
-          _refreshLoginState();
-          if (!mounted) return;
-          const labels = {LoginPlatform.instagram: 'Instagram', LoginPlatform.x: 'X', LoginPlatform.facebook: 'Facebook'};
-          messenger.showSnackBar(
-            SnackBar(
-              content: Text('Logged out of ${labels[platform]}'),
-              duration: const Duration(seconds: 2),
-            ),
-          );
-        },
+      // StatefulBuilder so the sheet can rebuild itself after a logout/login —
+      // otherwise the open modal keeps showing stale login flags until it's
+      // closed and reopened (the parent setState doesn't reach the modal tree).
+      builder: (_) => StatefulBuilder(
+        builder: (_, setSheetState) => _AccountsSheet(
+          igLoggedIn: _igLoggedIn,
+          xLoggedIn: _xLoggedIn,
+          fbLoggedIn: _fbLoggedIn,
+          igUsername: _igUsername,
+          xUsername: _xUsername,
+          fbUsername: _fbUsername,
+          onLogin: (platform) async {
+            final nav = Navigator.of(context);
+            nav.pop();
+            final result = await nav.push<bool>(
+              MaterialPageRoute(
+                builder: (_) => LoginScreen(platform: platform),
+              ),
+            );
+            if (result == true) await _refreshLoginState();
+          },
+          onLogout: (platform) async {
+            final messenger = ScaffoldMessenger.of(context);
+            await SessionService.clearSession(platform);
+            await _refreshLoginState(); // refresh parent flags first…
+            setSheetState(() {});       // …then rebuild the open sheet with them
+            if (!mounted) return;
+            const labels = {LoginPlatform.instagram: 'Instagram', LoginPlatform.x: 'X', LoginPlatform.facebook: 'Facebook'};
+            messenger.showSnackBar(
+              SnackBar(
+                content: Text('Logged out of ${labels[platform]}'),
+                duration: const Duration(seconds: 2),
+              ),
+            );
+          },
+        ),
       ),
     );
   }
@@ -416,7 +422,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.1.3',
+                    'v1.0.1.4',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
