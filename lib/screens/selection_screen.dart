@@ -366,6 +366,10 @@ class _ErrorViewState extends State<_ErrorView> {
     if (e.contains('redirect')) return _ErrorKind.redirectLoop;
     if (e.contains('429') ||
         e.contains('rate') ||
+        e.contains('flagged automated') ||
+        e.contains('hourly request limit') ||
+        e.contains('checkpoint') ||
+        e.contains('challenge') ||
         (e.contains('400') && (e.contains('wait') || e.contains('many')))) {
       return _ErrorKind.apiRateLimit;
     }

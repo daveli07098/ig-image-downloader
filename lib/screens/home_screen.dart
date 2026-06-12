@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -7,6 +8,7 @@ import '../providers/download_queue_provider.dart';
 import '../providers/settings_provider.dart';
 import '../providers/share_intent_provider.dart';
 import '../services/dev_logger.dart';
+import '../services/rate_guard_service.dart';
 import '../services/session_service.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
@@ -414,7 +416,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.0.1.1',
+                    'v1.0.1.2',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -480,6 +482,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             onSubmit: _openSelection,
             onPaste: _pasteFromClipboard,
           ),
+
+          // ── Instagram request-budget reminder ────────────────────────────
+          // Amber as you near the hourly limit, red (with live countdown) when
+          // throttled or flagged. Hidden entirely while there's ample budget.
+          const _RateGuardBanner(),
 
           // ── Logged-in accounts status bar ────────────────────────────────
           if (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
@@ -829,6 +836,116 @@ class _PlatformRow extends StatelessWidget {
                   onPressed: onLogin,
                   child: const Text('Login'),
                 ),
+        ],
+      ),
+    );
+  }
+}
+
+// ── Instagram request-budget reminder banner ────────────────────────────────
+
+/// Heading banner reflecting [RateGuard]: amber as the hourly Instagram request
+/// budget runs low, red (with a live countdown) when throttled or flagged by
+/// Instagram. Renders nothing while there's ample budget. Drives a 1 s ticker
+/// so the budget recovers and any cooldown counts down on screen in real time.
+class _RateGuardBanner extends StatefulWidget {
+  const _RateGuardBanner();
+
+  @override
+  State<_RateGuardBanner> createState() => _RateGuardBannerState();
+}
+
+class _RateGuardBannerState extends State<_RateGuardBanner> {
+  Timer? _ticker;
+
+  @override
+  void initState() {
+    super.initState();
+    RateGuard.instance.listenable.addListener(_onChange);
+    // Recompute every second so the rolling window recovers and any cooldown
+    // countdown updates without the user touching anything.
+    _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
+      RateGuard.instance.refresh();
+      if (mounted) setState(() {});
+    });
+  }
+
+  void _onChange() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _ticker?.cancel();
+    RateGuard.instance.listenable.removeListener(_onChange);
+    super.dispose();
+  }
+
+  String _countdown(DateTime until) {
+    final secs = until.difference(DateTime.now()).inSeconds.clamp(0, 1 << 31);
+    final h = secs ~/ 3600;
+    final m = (secs % 3600) ~/ 60;
+    final s = secs % 60;
+    if (h > 0) return '${h}h ${m}m';
+    if (m > 0) return '${m}m ${s.toString().padLeft(2, '0')}s';
+    return '${s}s';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final status = RateGuard.instance.status;
+    if (status.level == RateLevel.ok) return const SizedBox.shrink();
+
+    final cs = Theme.of(context).colorScheme;
+    final blocked = status.level == RateLevel.blocked;
+
+    final Color bg;
+    final Color fg;
+    final IconData icon;
+    final String text;
+
+    if (blocked) {
+      bg = cs.errorContainer;
+      fg = cs.onErrorContainer;
+      final left = status.blockedUntil != null
+          ? ' — retry in ${_countdown(status.blockedUntil!)}'
+          : '';
+      if (status.isChallenge) {
+        icon = Icons.gpp_maybe_rounded;
+        text =
+            'Instagram flagged automated activity. Requests paused — open the '
+            'Instagram app, clear any prompt, then wait$left.';
+      } else {
+        icon = Icons.timer_rounded;
+        text =
+            'Hourly Instagram request limit reached (${status.limit}/hr). '
+            'Paused to avoid automation detection$left.';
+      }
+    } else {
+      // warn
+      bg = const Color(0xFFFFE0B2); // amber 100
+      fg = const Color(0xFF7A4F01);
+      icon = Icons.speed_rounded;
+      text =
+          'Slow down — ${status.usedLastHour}/${status.limit} Instagram '
+          'requests this hour. Pause a bit to avoid automation detection.';
+    }
+
+    return Container(
+      width: double.infinity,
+      color: bg,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        children: [
+          Icon(icon, size: 20, color: fg),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              text,
+              style: TextStyle(
+                  color: fg, fontSize: 12.5, fontWeight: FontWeight.w500),
+            ),
+          ),
         ],
       ),
     );

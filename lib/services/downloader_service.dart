@@ -8,6 +8,7 @@ import '../models/media_item.dart';
 import 'facebook_downloader_service.dart';
 import 'generic_article_downloader_service.dart';
 import 'ig_url_parser.dart';
+import 'rate_guard_service.dart';
 import 'session_service.dart';
 import 'storage_service.dart';
 import 'threads_downloader_service.dart';
@@ -220,6 +221,19 @@ class DownloaderService {
 
   // ── Strategy 0: Instagram private API ──────────────────────────────────
 
+  /// True when an `i.instagram.com` response indicates Instagram is pushing
+  /// back on automation: a 429 (too many requests) or a challenge/checkpoint/
+  /// login wall — which Instagram returns with either an error status OR a
+  /// 200 carrying a `"status":"fail"` body. Treated as a hard signal to back
+  /// off, since hammering through it is what escalates a soft flag.
+  static bool _isPushback(int? statusCode, String lowerBody) {
+    if (statusCode == 429) return true;
+    return lowerBody.contains('checkpoint_required') ||
+        lowerBody.contains('challenge_required') ||
+        lowerBody.contains('login_required') ||
+        lowerBody.contains('please wait a few minutes');
+  }
+
   /// Extracts the shortcode from an Instagram URL.
   /// Handles /p/, /reel/, /tv/ paths.
   static String? _extractShortcode(String url) {
@@ -263,12 +277,44 @@ class DownloaderService {
     final url = 'https://i.instagram.com/api/v1/media/$mediaId/info/';
     debugPrint('[IG] Private API: $url');
 
-    final resp = await _apiDio.get<String>(
-      url,
-      options: Options(headers: {'Cookie': 'sessionid=$sessionId'}),
-    );
+    // Rate-gate the authenticated surface that triggers automation flags.
+    // Throws RateLimitException when the hourly budget is spent or a challenge
+    // cooldown is active; counts this call against the budget once allowed.
+    RateGuard.instance.assertCanCall();
+    await RateGuard.instance.recordApiCall();
+
+    final Response<String> resp;
+    try {
+      resp = await _apiDio.get<String>(
+        url,
+        options: Options(headers: {'Cookie': 'sessionid=$sessionId'}),
+      );
+    } on DioException catch (e) {
+      final code = e.response?.statusCode;
+      final body = e.response?.data?.toString().toLowerCase() ?? '';
+      if (_isPushback(code, body)) {
+        await RateGuard.instance.triggerChallengeCooldown();
+        throw Exception(
+          'Instagram flagged automated activity (HTTP $code). Requests are '
+          'paused to protect your account — open the Instagram app, clear any '
+          'prompt, then wait before retrying.',
+        );
+      }
+      rethrow;
+    }
 
     if (resp.statusCode != 200 || resp.data == null) return [];
+
+    // A 200 can still carry a soft challenge/login wall in its JSON body.
+    final lowerBody = resp.data!.toLowerCase();
+    if (_isPushback(resp.statusCode, lowerBody)) {
+      await RateGuard.instance.triggerChallengeCooldown();
+      throw Exception(
+        'Instagram flagged automated activity. Requests are paused to protect '
+        'your account — open the Instagram app, clear any prompt, then wait '
+        'before retrying.',
+      );
+    }
 
     final data = jsonDecode(resp.data!) as Map<String, dynamic>;
     final item = _dig(data, ['items', 0]) as Map<String, dynamic>?;
