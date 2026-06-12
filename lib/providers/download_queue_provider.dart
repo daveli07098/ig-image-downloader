@@ -136,20 +136,43 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
     _persistJobs();
   }
 
+  // Coalesced/serialised persistence. _pendingSnapshot always holds the latest
+  // state to write; the single drain loop guarantees writes never reorder, so a
+  // stale snapshot can't overwrite a newer one and drop a freshly-added job.
+  List<DownloadJob>? _pendingSnapshot;
+  bool _persisting = false;
+
   /// Persist all jobs so they survive Android process kills between shares.
   /// In-progress downloads are saved as pending so they can be retried.
-  Future<void> _persistJobs() async {
+  /// Safe to call from anywhere, as often as needed — the snapshot is captured
+  /// synchronously (never reads `state` after an await or after dispose) and the
+  /// writer coalesces bursts into a single up-to-date write.
+  void _persistJobs() {
+    _pendingSnapshot = state; // synchronous capture of the current (immutable) list
+    _drainPersist();
+  }
+
+  Future<void> _drainPersist() async {
+    if (_persisting) return;
+    _persisting = true;
     try {
       final prefs = await SharedPreferences.getInstance();
-      final toSave = state.map((j) {
-        // Treat downloading as pending so it shows as resumable on restart
-        if (j.status == JobStatus.downloading) {
-          return j.copyWith(status: JobStatus.pending, progress: 0);
-        }
-        return j;
-      }).map((j) => j.toJson()).toList();
-      await prefs.setString(_prefsKey, jsonEncode(toSave));
-    } catch (_) {}
+      while (_pendingSnapshot != null) {
+        final snapshot = _pendingSnapshot!;
+        _pendingSnapshot = null;
+        final toSave = snapshot.map((j) {
+          // Treat downloading as pending so it shows as resumable on restart
+          if (j.status == JobStatus.downloading) {
+            return j.copyWith(status: JobStatus.pending, progress: 0);
+          }
+          return j;
+        }).map((j) => j.toJson()).toList();
+        await prefs.setString(_prefsKey, jsonEncode(toSave));
+      }
+    } catch (_) {
+    } finally {
+      _persisting = false;
+    }
   }
 
   /// Load persisted jobs on startup. Pending jobs were queued when the app
@@ -251,7 +274,9 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
   }
 
   void remove(String jobId) {
+    _pendingIds.remove(jobId); // also drop from the queue so it isn't re-run
     state = state.where((j) => j.id != jobId).toList();
+    _persistJobs();
   }
 
   void clearFinished() {
@@ -260,6 +285,7 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
             j.status == JobStatus.pending ||
             j.status == JobStatus.downloading)
         .toList();
+    _persistJobs();
   }
 
   // ── internals ──────────────────────────────────────────────────

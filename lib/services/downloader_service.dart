@@ -589,13 +589,28 @@ class DownloaderService {
     final saveDir = await StorageService.getOrCreateSaveDir(item.username);
     final filename = '${item.filenameBase}.$ext';
     final savePath = '${saveDir.path}/$filename';
+    // Download to a temp sibling first, then atomically rename on success. A
+    // complete file therefore ONLY ever appears at the final path, so the
+    // existence check below is a reliable "already downloaded" signal even if a
+    // previous attempt was killed mid-stream while the app was backgrounded.
+    final tempPath = '$savePath.part';
     debugPrint('[IG] savePath: $savePath');
 
-    // File already exists — skip re-download (e.g. after permission-denied on first attempt
-    // that was actually a "file exists" OS error on Android public storage).
-    if (File(savePath).existsSync()) {
-      debugPrint('[IG] Already exists, skipping download: $savePath');
+    // Skip only when a COMPLETE file already exists. A zero-byte file is a
+    // leftover from an interrupted download and must be re-fetched, not skipped
+    // — this was the cause of false "already downloaded" reports.
+    final existing = File(savePath);
+    if (existing.existsSync() && existing.lengthSync() > 0) {
+      debugPrint('[IG] Already exists (${existing.lengthSync()} B), skipping: $savePath');
       return (path: savePath, skipped: true);
+    }
+    // Remove a stale 0-byte final file or a leftover .part from a prior attempt.
+    if (existing.existsSync()) {
+      try { existing.deleteSync(); } catch (_) {}
+    }
+    final stalePart = File(tempPath);
+    if (stalePart.existsSync()) {
+      try { stalePart.deleteSync(); } catch (_) {}
     }
 
     final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
@@ -603,27 +618,31 @@ class DownloaderService {
     final isIgCdn = item.mediaUrl.contains('cdninstagram.com') ||
         item.mediaUrl.contains('instagram.com') ||
         item.mediaUrl.contains('fbcdn.net');
-    try {
-      await _dio.download(
-        item.mediaUrl,
-        savePath,
-        options: (sessionId != null && isIgCdn)
-            ? Options(headers: {'Cookie': 'sessionid=$sessionId'})
-            : null,
-        onReceiveProgress: (received, total) {
-          if (total > 0) onProgress(received / total);
-        },
-      );
-    } catch (e) {
-      // If the download threw but the file was written anyway (e.g. OS-level
-      // "file exists" error on Android public storage, or a partial write that
-      // completed), treat it as success rather than surfacing an error.
-      if (File(savePath).existsSync()) {
-        debugPrint('[IG] Download error but file exists, treating as done: $savePath');
-        return (path: savePath, skipped: true);
+
+    await _dio.download(
+      item.mediaUrl,
+      tempPath,
+      // On any Dio error the partial temp file is deleted, so an interrupted
+      // download never leaves a file that looks complete.
+      deleteOnError: true,
+      options: (sessionId != null && isIgCdn)
+          ? Options(headers: {'Cookie': 'sessionid=$sessionId'})
+          : null,
+      onReceiveProgress: (received, total) {
+        if (total > 0) onProgress(received / total);
+      },
+    );
+
+    // Verify we actually received bytes before promoting to the final name.
+    final temp = File(tempPath);
+    if (!temp.existsSync() || temp.lengthSync() == 0) {
+      if (temp.existsSync()) {
+        try { temp.deleteSync(); } catch (_) {}
       }
-      rethrow;
+      throw Exception('Download produced an empty file — please retry.');
     }
+    // Atomic promote within the same directory.
+    await temp.rename(savePath);
 
     // Tell Android's MediaStore about the new file so it shows up in the
     // media browser (gallery apps, Files app) immediately, without copying

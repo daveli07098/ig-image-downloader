@@ -12,6 +12,8 @@
 
 ### Fixed
 - fix(android): `MainActivity` launch mode `singleTop` → `singleTask` (+ empty `taskAffinity`) so re-shares no longer pile up duplicate app cards in the Recents screen
+- fix(download): false "already downloaded — skipped" — downloads now write to a `.part` temp file and atomically rename on success, so a background process-kill no longer leaves a partial file at the final path that gets skipped forever; zero-byte leftovers are re-fetched and empty downloads error instead of reporting success
+- fix(queue): no more lost queue items — persistence is now serialised + coalesced (latest state always wins, stale snapshots can't overwrite newer ones) and `remove`/`clearFinished` now persist, so removed/cleared/added jobs stay correct across restarts
 
 ### Maintenance
 - chore: bump to v1.0.1.0 — build counter now resets to 0 on each minor/sub-version bump
