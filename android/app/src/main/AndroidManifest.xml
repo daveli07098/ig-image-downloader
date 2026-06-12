@@ -33,17 +33,19 @@
         android:requestLegacyExternalStorage="true">
 
         <!--
-          singleTask (not singleTop): every share from Instagram/X/Facebook is
-          routed to the SAME existing task instead of spawning a new one. This
-          stops the Recents screen from filling up with many duplicate IG
-          Downloader cards when the app is minimised and re-shared to.
-          receive_sharing_intent delivers re-shares via onNewIntent.
+          Recents de-duplication for share targets:
+          - launchMode singleTask  → only ever one MainActivity instance; a new
+            share is delivered to the existing one via onNewIntent.
+          - documentLaunchMode never → overrides FLAG_ACTIVITY_NEW_DOCUMENT /
+            FLAG_ACTIVITY_MULTIPLE_TASK that Instagram's share sheet sets, which
+            is what was spawning a fresh Recents card per share. With "never",
+            every share stays in the one task → a single Recents entry.
         -->
         <activity
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:taskAffinity=""
+            android:documentLaunchMode="never"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
