@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-06-13] — Session: Instagram automation-flag avoidance (request budget + cooldown)
+
+### Added
+- feat(ratelimit): `RateGuard` service — a persistent rolling-hour budget (80 calls/hr, warn at 60) over the authenticated `i.instagram.com` private API, the metered surface that triggers Instagram's "automated behaviour" flags. Counts every metadata call, blocks once the budget is spent, and persists state so the budget survives app restarts ([7ba952a])
+- feat(ratelimit): hard cooldown (2 h) when Instagram pushes back — a 429 or a `checkpoint_required` / `challenge_required` / `login_required` body trips it; the cooldown is persisted so reopening the app can't reset it ([7ba952a])
+- feat(ui): heading reminder banner — amber "slow down" as the hourly budget runs low, red with a live countdown when throttled or flagged (open the IG app, clear the prompt, wait); hidden while there's ample budget ([7ba952a])
+
+### Changed
+- feat(download): authenticated private-API calls are now gated before they fire; when blocked, public posts still fall back to the cookie-less embed path so downloads keep working without touching the flagged surface ([7ba952a])
+- feat(ui): selection-screen error classifier routes the new flag/limit messages to the rate-limit tier (5-min cooldown UI) ([7ba952a])
+
 ## [2026-06-13] — Session: v1.0.1 big upgrade (icon, history, background downloads)
 
 ### Added
