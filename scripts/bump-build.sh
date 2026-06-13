@@ -84,12 +84,49 @@ fi
 git commit -m "chore: bump to ${NEW_DISPLAY_VERSION}"
 echo "Committed: $(git rev-parse --short HEAD)"
 
-# ── Optionally build + install ────────────────────────────────────────────────
+# ── Optionally build + install on the connected device ───────────────────────
+# Detect whatever real device is plugged in and build for *its* platform —
+# Android phone/emulator → APK + adb install; iOS device/simulator → flutter
+# install. Physical devices are preferred over emulators/simulators. Falls back
+# to a plain Android APK build if no device is connected.
 if [[ "$DO_BUILD" == "1" ]]; then
-  echo "Building release APK…"
-  fvm flutter build apk --release
-  echo "Installing on device (keeping app data, allowing versionCode downgrade)…"
-  DEVICE=$(${ADB} devices | awk 'NR==2{print $1}')
-  ${ADB} -s "$DEVICE" install -r -d build/app/outputs/flutter-apk/app-release.apk
-  echo "Installed ${NEW_DISPLAY_VERSION} on ${DEVICE}"
+  # Ask Flutter what is connected (JSON), then pick the best target with python.
+  # Output: "<id>\t<platformType>" (platformType = android | ios), empty if none.
+  DEVICES_JSON=$(fvm flutter devices --machine 2>/dev/null || echo '[]')
+  TARGET=$(printf '%s' "$DEVICES_JSON" | python3 -c '
+import json, sys
+try:
+    devs = json.load(sys.stdin)
+except Exception:
+    devs = []
+# Keep only installable mobile targets that Flutter can deploy to.
+cand = [d for d in devs
+        if d.get("platformType") in ("android", "ios") and d.get("isSupported", True)]
+# Prefer a physical device over an emulator/simulator; keep stable order otherwise.
+cand.sort(key=lambda d: 0 if not d.get("emulator", False) else 1)
+if cand:
+    d = cand[0]
+    print("{}\t{}".format(d.get("id", ""), d.get("platformType", "")))
+' 2>/dev/null || true)
+
+  DEVICE_ID="${TARGET%%$'\t'*}"
+  PLATFORM="${TARGET##*$'\t'}"
+
+  if [[ -z "$DEVICE_ID" ]]; then
+    echo "No connected device found — building a release APK only (not installing)…"
+    fvm flutter build apk --release
+    echo "Built ${NEW_DISPLAY_VERSION} APK → build/app/outputs/flutter-apk/app-release.apk"
+  elif [[ "$PLATFORM" == "android" ]]; then
+    echo "Android device '${DEVICE_ID}' detected — building release APK…"
+    fvm flutter build apk --release
+    echo "Installing (keeping app data, allowing versionCode downgrade)…"
+    ${ADB} -s "$DEVICE_ID" install -r -d build/app/outputs/flutter-apk/app-release.apk
+    echo "Installed ${NEW_DISPLAY_VERSION} on ${DEVICE_ID} (android)"
+  else
+    # iOS physical device or simulator: flutter install handles build + deploy
+    # without staying attached (unlike `flutter run`).
+    echo "iOS device '${DEVICE_ID}' detected — building + installing release…"
+    fvm flutter install --release -d "$DEVICE_ID"
+    echo "Installed ${NEW_DISPLAY_VERSION} on ${DEVICE_ID} (ios)"
+  fi
 fi
