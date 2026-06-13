@@ -1,5 +1,16 @@
 # Changelog
 
+## [2026-06-13] — Session: Open-post deep link into the Instagram app
+
+### Changed
+- feat(deeplink): the "Open original post" button now deep-links straight onto the post inside the Instagram app via `instagram://media?id=<numericId>`, where IG shows the timestamp and the user can scroll to the posts before/after it; falls back to the https link (IG app via app links, else browser) when IG isn't installed or the URL carries no shortcode (stories/unknown). Note: IG exposes no way for a third party to switch the logged-in account, so the post renders under whichever account is active in the IG app ([0fd8637])
+
+### Added
+- feat(ig_url_parser): `shortcodeToMediaId` (BigInt decode over IG's URL-safe base64 alphabet) + `instagramAppUri()` builder for post/reel/IGTV URLs ([0fd8637])
+
+### Maintenance
+- chore(platform): AndroidManifest `<queries>` + iOS `LSApplicationQueriesSchemes` for the `instagram` scheme so `url_launcher` resolves the deep link on Android 11+ / iOS ([0fd8637])
+
 ## [2026-06-13] — Session: Instagram automation-flag avoidance (request budget + cooldown)
 
 ### Added
