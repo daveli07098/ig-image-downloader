@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026-06-13] — Session: Open author profile feed
+
+### Added
+- feat(ui): each download tile now has a second button (person icon) that opens the author's Instagram **profile feed** — `instagram.com/<username>` from `MediaItem.username` — giving the scrollable, newest-first post feed. The existing button still opens the exact post. Instagram exposes no deep link that lands on a post *within* a scrollable feed (and an app can't drive IG to scroll/jump after launch), so this profile entry point — where a recent post sits near the top, one tap into the scrollable feed — is the closest achievable. Profile button shows only for IG media with a known username ([5be1d94])
+
 ## [2026-06-13] — Session: Fix dead-page deep link
 
 ### Fixed
