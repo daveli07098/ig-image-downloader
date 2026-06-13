@@ -58,8 +58,24 @@ class DownloadJobTile extends StatelessWidget {
                 ),
                 const SizedBox(width: 4),
 
-                // Jump back to the original post (IG / X / Facebook)
-                _OpenPostButton(url: job.url),
+                // Open the author's scrollable profile feed (IG only, when the
+                // username is known). Instagram has no deep link that lands on a
+                // post *within* a scrollable feed, so the profile grid — sorted
+                // newest-first — is the closest: the post sits near the top and
+                // one tap drops into the scrollable post feed.
+                if (_instagramProfileUrl(job) != null)
+                  _OpenUrlButton(
+                    url: _instagramProfileUrl(job)!,
+                    icon: Icons.account_circle_outlined,
+                    tooltip: 'Open profile feed',
+                  ),
+
+                // Jump back to the exact original post (IG / X / Facebook)
+                _OpenUrlButton(
+                  url: job.url,
+                  icon: Icons.open_in_new_rounded,
+                  tooltip: 'Open post',
+                ),
 
                 // Actions
                 _ActionButton(job: job, onRetry: onRetry, onRemove: onRemove),
@@ -218,11 +234,36 @@ class _StatusText extends StatelessWidget {
   }
 }
 
-// ── Open original post button ─────────────────────────────────────────────────
+// ── Instagram profile URL helper ──────────────────────────────────────────────
 
-class _OpenPostButton extends StatelessWidget {
-  const _OpenPostButton({required this.url});
+/// The author's profile URL for Instagram media when the username is known,
+/// else null. Only Instagram has a username we can resolve to a profile here;
+/// X/Facebook/Threads jobs return null so no profile button is shown.
+String? _instagramProfileUrl(DownloadJob job) {
+  const igTypes = {
+    IgMediaType.post,
+    IgMediaType.reel,
+    IgMediaType.story,
+    IgMediaType.igtv,
+  };
+  if (!igTypes.contains(job.mediaType)) return null;
+  final username = job.item.username;
+  if (username.isEmpty || username == 'unknown') return null;
+  return 'https://www.instagram.com/$username/';
+}
+
+// ── Open URL button (original post / author profile) ──────────────────────────
+
+class _OpenUrlButton extends StatelessWidget {
+  const _OpenUrlButton({
+    required this.url,
+    required this.icon,
+    required this.tooltip,
+  });
+
   final String url;
+  final IconData icon;
+  final String tooltip;
 
   Future<void> _open(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -233,17 +274,16 @@ class _OpenPostButton extends StatelessWidget {
       );
       return;
     }
-    // Open the original https permalink. externalApplication hands it to the
-    // native IG/X/FB app via Android App Links / iOS Universal Links when the
-    // app is installed (where the post opens in a scrollable feed under the
-    // currently-active account), otherwise it falls back to the browser.
+    // Open the https URL. externalApplication hands it to the native IG/X/FB
+    // app via Android App Links / iOS Universal Links when installed (post or
+    // profile opens under the currently-active account), else the browser.
     //
     // NB: we deliberately do NOT use the instagram://media?id=… scheme — it is
     // effectively deprecated and opens a blank/dead page in modern Instagram.
     final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!ok) {
       messenger.showSnackBar(
-        const SnackBar(content: Text("Couldn't open the original link")),
+        const SnackBar(content: Text("Couldn't open the link")),
       );
     }
   }
@@ -251,9 +291,9 @@ class _OpenPostButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return IconButton(
-      icon: const Icon(Icons.open_in_new_rounded),
+      icon: Icon(icon),
       onPressed: () => _open(context),
-      tooltip: 'Open in Instagram',
+      tooltip: tooltip,
     );
   }
 }
