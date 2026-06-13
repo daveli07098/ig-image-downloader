@@ -1,5 +1,10 @@
 # Changelog
 
+## [2026-06-13] — Session: Fix Facebook login WebView crash
+
+### Fixed
+- fix(login): Facebook login dropped onto a `net::ERR_UNKNOWN_URL_SCHEME` error page because the login page redirects to a native-app handoff custom scheme (`…://login_via_app/?…`) that a WebView can't load. The login WebView had no `onNavigationRequest`; added one that allows only `http`/`https`/`about` and blocks other schemes, keeping the user in the web flow where the session cookie (`c_user`) is captured. Applies to Instagram/X/Facebook ([7c064e5])
+
 ## [2026-06-13] — Session: Stable release signing (keep app data across builds)
 
 ### Changed
