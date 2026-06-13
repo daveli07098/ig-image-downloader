@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-06-13] — Session: Fix dead-page deep link
+
+### Fixed
+- fix(deeplink): the "Open post" button opened a blank/dead page because `instagram://media?id=<id>` is effectively deprecated in modern Instagram (and since the launch reported success, the https fallback never ran). Reverted to launching the original https permalink with `externalApplication` — the IG app intercepts it via App Links / Universal Links and shows the post in a scrollable feed under the active account, falling back to the browser when IG isn't installed ([400b954])
+- chore: removed the now-unused shortcode→media-id helpers and the `instagram` scheme entries in AndroidManifest `<queries>` / iOS `LSApplicationQueriesSchemes` ([400b954])
+
+### Notes
+- The repeated "login reset" was caused by two one-time uninstalls during this session (the manual `flutter install`, then the debug→release keystore switch). With stable release signing now in place, `adb install -r` updates keep accounts/history/settings — login persists across builds.
+
 ## [2026-06-13] — Session: Fix Facebook login WebView crash
 
 ### Fixed
