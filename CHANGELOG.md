@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-06-13] — Session: Stable release signing (keep app data across builds)
+
+### Changed
+- build(android): release builds are now signed with a dedicated release keystore loaded from `android/key.properties` (gitignored), instead of the debug key. A debug-key signature is volatile — any change (new machine, regenerated `debug.keystore`) forced an uninstall on update, which wiped **all** persisted data: logged-in accounts/sessions, download history (`job_queue_v2`), and settings. With a stable keystore, `adb install -r` performs true in-place updates that keep that data, and the app is Play-Store-ready. Falls back to the debug key when `key.properties` is absent (CI / other devs) ([c4ab4b8])
+
+### Notes
+- Download history was already persisted to SharedPreferences and survives app restarts; the data loss on upgrades was caused by uninstall-on-signature-mismatch, not by missing persistence.
+- Keystore lives outside the repo at `~/.android-keystores/ig-downloader-release.jks` — **must be backed up**; losing it means no future updates can be signed with the same key.
+
 ## [2026-06-13] — Session: Open-post deep link into the Instagram app
 
 ### Changed
