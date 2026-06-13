@@ -29,6 +29,15 @@
 		</dict>
 	</array>
 
+	<!-- ── Deep-link query scheme ──────────────────────────────────────────
+	     url_launcher / canLaunchUrl must be allowed to query the Instagram
+	     app's custom scheme to deep-link onto a post (instagram://media?id=…).
+	     iOS returns false for unlisted schemes, so the launch would fail. -->
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>instagram</string>
+	</array>
+
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleDisplayName</key>

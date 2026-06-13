@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/download_job.dart';
+import '../services/ig_url_parser.dart';
 import '../services/storage_service.dart';
 
 class DownloadJobTile extends StatelessWidget {
@@ -226,16 +227,32 @@ class _OpenPostButton extends StatelessWidget {
 
   Future<void> _open(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
-    final uri = Uri.tryParse(url);
-    if (uri == null) {
+
+    // Prefer the native Instagram deep link so the post opens directly inside
+    // the IG app — under whichever account is currently active there (IG gives
+    // third parties no way to switch the logged-in account) — where the user
+    // can see the timestamp and scroll to the posts before/after it.
+    final igUri = IgUrlParser.instagramAppUri(url);
+    if (igUri != null) {
+      try {
+        if (await launchUrl(igUri, mode: LaunchMode.externalApplication)) {
+          return;
+        }
+      } catch (_) {
+        // IG app not installed or scheme unhandled — fall through to the web URL.
+      }
+    }
+
+    // Fallback: open the original https link. externalApplication hands it to
+    // the native IG/X/FB app via app links when installed, else the browser.
+    final webUri = Uri.tryParse(url);
+    if (webUri == null) {
       messenger.showSnackBar(
         const SnackBar(content: Text('Invalid link')),
       );
       return;
     }
-    // externalApplication opens the native IG/X/FB app when installed,
-    // otherwise falls back to the default browser.
-    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    final ok = await launchUrl(webUri, mode: LaunchMode.externalApplication);
     if (!ok) {
       messenger.showSnackBar(
         const SnackBar(content: Text("Couldn't open the original link")),
@@ -248,7 +265,7 @@ class _OpenPostButton extends StatelessWidget {
     return IconButton(
       icon: const Icon(Icons.open_in_new_rounded),
       onPressed: () => _open(context),
-      tooltip: 'Open original post',
+      tooltip: 'Open in Instagram',
     );
   }
 }
