@@ -25,17 +25,6 @@
          on Android 14+ (API 34) to match the dataSync service type. -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC"/>
 
-    <!-- ── Package visibility (Android 11+) ───────────────────────────────
-         url_launcher must be able to resolve the Instagram app's custom
-         scheme to deep-link straight onto a post (instagram://media?id=…).
-         Without this <queries> entry the launch silently fails on API 30+. -->
-    <queries>
-        <intent>
-            <action android:name="android.intent.action.VIEW"/>
-            <data android:scheme="instagram"/>
-        </intent>
-    </queries>
-
     <application
         android:label="IG Downloader"
         android:name="${applicationName}"

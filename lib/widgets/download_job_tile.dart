@@ -2,7 +2,6 @@ import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../models/download_job.dart';
-import '../services/ig_url_parser.dart';
 import '../services/storage_service.dart';
 
 class DownloadJobTile extends StatelessWidget {
@@ -227,32 +226,21 @@ class _OpenPostButton extends StatelessWidget {
 
   Future<void> _open(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
-
-    // Prefer the native Instagram deep link so the post opens directly inside
-    // the IG app — under whichever account is currently active there (IG gives
-    // third parties no way to switch the logged-in account) — where the user
-    // can see the timestamp and scroll to the posts before/after it.
-    final igUri = IgUrlParser.instagramAppUri(url);
-    if (igUri != null) {
-      try {
-        if (await launchUrl(igUri, mode: LaunchMode.externalApplication)) {
-          return;
-        }
-      } catch (_) {
-        // IG app not installed or scheme unhandled — fall through to the web URL.
-      }
-    }
-
-    // Fallback: open the original https link. externalApplication hands it to
-    // the native IG/X/FB app via app links when installed, else the browser.
-    final webUri = Uri.tryParse(url);
-    if (webUri == null) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) {
       messenger.showSnackBar(
         const SnackBar(content: Text('Invalid link')),
       );
       return;
     }
-    final ok = await launchUrl(webUri, mode: LaunchMode.externalApplication);
+    // Open the original https permalink. externalApplication hands it to the
+    // native IG/X/FB app via Android App Links / iOS Universal Links when the
+    // app is installed (where the post opens in a scrollable feed under the
+    // currently-active account), otherwise it falls back to the browser.
+    //
+    // NB: we deliberately do NOT use the instagram://media?id=… scheme — it is
+    // effectively deprecated and opens a blank/dead page in modern Instagram.
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!ok) {
       messenger.showSnackBar(
         const SnackBar(content: Text("Couldn't open the original link")),
