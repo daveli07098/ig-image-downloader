@@ -112,6 +112,18 @@ class _LoginScreenState extends State<LoginScreen> {
         'Chrome/136.0.0.0 Mobile Safari/537.36',
       )
       ..setNavigationDelegate(NavigationDelegate(
+        // Facebook (and IG/X) try to hand the login off to their native app via
+        // a custom scheme (e.g. fb…://login_via_app/?…). A WebView can't load a
+        // non-web scheme, so it dies with ERR_UNKNOWN_URL_SCHEME. Keep the user
+        // in the web flow — which is the only place we can read the session
+        // cookie — by allowing http/https/about and blocking everything else.
+        onNavigationRequest: (request) {
+          final scheme = Uri.tryParse(request.url)?.scheme.toLowerCase() ?? '';
+          if (scheme == 'http' || scheme == 'https' || scheme == 'about') {
+            return NavigationDecision.navigate;
+          }
+          return NavigationDecision.prevent;
+        },
         onPageStarted: (_) => setState(() => _loading = true),
         onPageFinished: (url) async {
           setState(() => _loading = false);
