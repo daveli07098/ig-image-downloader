@@ -38,18 +38,33 @@ VERSION=$(grep '^version:' pubspec.yaml | awk '{print $2}' || echo '?')
 DEVICES_JSON=$(fvm flutter devices --machine 2>/dev/null || echo '[]')
 TARGET=$(printf '%s' "$DEVICES_JSON" | python3 -c '
 import json, sys
+
+def platform_of(d):
+    # Newer Flutter emits only "targetPlatform" (e.g. "android-arm64",
+    # "ios", "darwin", "web-javascript"); older builds also had "platformType".
+    # Normalise both to "android" / "ios" / other.
+    pt = d.get("platformType")
+    if pt in ("android", "ios"):
+        return pt
+    tp = (d.get("targetPlatform") or "")
+    if tp.startswith("android"):
+        return "android"
+    if tp.startswith("ios"):
+        return "ios"
+    return ""
+
 try:
     devs = json.load(sys.stdin)
 except Exception:
     devs = []
-# Keep only installable mobile targets that Flutter can deploy to.
-cand = [d for d in devs
-        if d.get("platformType") in ("android", "ios") and d.get("isSupported", True)]
+# Keep only installable mobile targets (drop desktop/web).
+cand = [(d, platform_of(d)) for d in devs if d.get("isSupported", True)]
+cand = [(d, p) for (d, p) in cand if p in ("android", "ios")]
 # Prefer a physical device over an emulator/simulator; keep stable order otherwise.
-cand.sort(key=lambda d: 0 if not d.get("emulator", False) else 1)
+cand.sort(key=lambda dp: 0 if not dp[0].get("emulator", False) else 1)
 if cand:
-    d = cand[0]
-    print("{}\t{}".format(d.get("id", ""), d.get("platformType", "")))
+    d, p = cand[0]
+    print("{}\t{}".format(d.get("id", ""), p))
 ' 2>/dev/null || true)
 
 DEVICE_ID="${TARGET%%$'\t'*}"
