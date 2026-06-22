@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../services/session_service.dart';
 
@@ -73,6 +74,28 @@ const _configs = {
   ),
 };
 
+/// Lower-cased substrings that appear on Instagram's "action blocked" /
+/// rate-limit / "try again later" interstitials. When any of these is present
+/// on the loaded page we treat the session as *blocked*: we keep the in-app
+/// browser open (instead of auto-closing) and surface an "open in browser"
+/// escape hatch so the user can clear the block on the real Chrome session.
+///
+/// Context: when this IG account is also signed in from another app (e.g. the
+/// Instagram app itself), Meta's security mechanism forces a password refresh /
+/// re-verification and shows an "open the Instagram app, try again later"
+/// block — which cannot be cleared inside the WebView. Detecting it lets the
+/// user bail out to a full browser rather than getting stuck in a retry loop.
+const _igBlockSignals = <String>[
+  'we restrict certain activity',
+  'blocked this action',
+  'action blocked',
+  'try again later',
+  'please wait a few minutes',
+  'open the instagram app',
+  'we limit how often',
+  "you're temporarily blocked",
+];
+
 /// Full-screen platform login via an in-app WebView.
 /// Pass [platform] to configure which site is loaded and which session
 /// cookie is captured.  The HttpOnly cookie is read via a native
@@ -91,6 +114,18 @@ class _LoginScreenState extends State<LoginScreen> {
   late final _PlatformConfig _cfg;
   bool _loading = true;
   bool _captured = false;
+
+  /// Last fully-loaded URL — used as the target when the user taps
+  /// "Open in browser" so the external Chrome session lands on the same page.
+  String _currentUrl = '';
+
+  /// True when Instagram has shown a block / "try again later" interstitial.
+  /// While blocked we do NOT auto-close the login screen — we keep the in-app
+  /// browser open and show the escape-hatch banner so the user can act.
+  bool _blocked = false;
+
+  /// The specific block phrase detected (shown to the user for context).
+  String? _blockText;
 
 
 
@@ -126,7 +161,23 @@ class _LoginScreenState extends State<LoginScreen> {
         },
         onPageStarted: (_) => setState(() => _loading = true),
         onPageFinished: (url) async {
-          setState(() => _loading = false);
+          setState(() {
+            _loading = false;
+            _currentUrl = url;
+          });
+          // Check for an Instagram block / "try again later" interstitial.
+          // If blocked, keep the in-app browser open (no auto-pop) and let the
+          // banner offer the "open in browser" escape hatch. If not blocked,
+          // proceed exactly as before: capture the session and go back.
+          final block = await _detectBlock();
+          if (block != null) {
+            // Login may already have succeeded before the *action* was blocked,
+            // so still try to save the session — but silently, without popping.
+            await _tryCaptureSession(url, autoPop: false);
+            _enterBlockedState(block);
+            return;
+          }
+          if (_blocked) setState(() => _blocked = false); // block cleared
           await _tryCaptureSession(url);
         },
         onWebResourceError: (error) {
@@ -146,7 +197,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
   static const _cookieChannel = MethodChannel('ig_downloader/cookies');
 
-  Future<void> _tryCaptureSession(String url) async {
+  Future<void> _tryCaptureSession(String url, {bool autoPop = true}) async {
     if (_captured) return;
     // Skip: we navigated here to stop a redirect loop (handled by _handleRedirectLoop).
     if (url.startsWith('about:')) return;
@@ -224,22 +275,115 @@ class _LoginScreenState extends State<LoginScreen> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Logged in to ${_cfg.label} — unlocked!')),
         );
-        Navigator.of(context).pop(true);
+        // When blocked we keep the screen open so the user can clear the block
+        // in a real browser; the session is saved but we don't pop yet.
+        if (autoPop) Navigator.of(context).pop(true);
       }
     }
+  }
+
+  // ── Block detection & escape hatch ─────────────────────────────────────
+
+  /// Scans the loaded page for an Instagram block / "try again later" message.
+  /// Returns the matched phrase, or null when the page looks normal. Only runs
+  /// for Instagram — other platforms have no equivalent interstitial here.
+  Future<String?> _detectBlock() async {
+    if (widget.platform != LoginPlatform.instagram) return null;
+    try {
+      final result = await _webController.runJavaScriptReturningResult(r'''
+        (function() {
+          try {
+            var t = (document.body && document.body.innerText
+                ? document.body.innerText : '').toLowerCase();
+            var s = [
+              'we restrict certain activity',
+              'blocked this action',
+              'action blocked',
+              'try again later',
+              'please wait a few minutes',
+              'open the instagram app',
+              'we limit how often',
+              "you're temporarily blocked"
+            ];
+            for (var i = 0; i < s.length; i++) {
+              if (t.indexOf(s[i]) > -1) return s[i];
+            }
+            return '';
+          } catch (e) { return ''; }
+        })()
+      ''');
+      final str = result.toString().replaceAll('"', '').trim();
+      if (str.isEmpty || str == 'null') return null;
+      // Defensive: make sure the returned value is actually one of our signals
+      // (some WebViews wrap JS results oddly).
+      return _igBlockSignals.contains(str) ? str : null;
+    } catch (e) {
+      debugPrint('[Login/${_cfg.label}] block detect failed: $e');
+      return null;
+    }
+  }
+
+  /// Switch the screen into the "blocked" state: keep the WebView visible and
+  /// show the banner with the "open in browser" escape hatch.
+  void _enterBlockedState(String phrase) {
+    if (!mounted) return;
+    setState(() {
+      _blocked = true;
+      _blockText = phrase;
+      _loading = false;
+    });
+  }
+
+  /// Opens the current page in the device's real browser (Chrome), where the
+  /// user can complete the security re-verification that the in-app WebView
+  /// can't. Mirrors the working launch pattern in download_job_tile.dart.
+  Future<void> _openInExternalBrowser() async {
+    // about:blank (e.g. after a redirect-loop stop) isn't useful externally —
+    // fall back to the platform login URL so Chrome lands somewhere sensible.
+    final target = (_currentUrl.isEmpty || _currentUrl.startsWith('about:'))
+        ? _cfg.loginUrl
+        : _currentUrl;
+    try {
+      final ok = await launchUrl(
+        Uri.parse(target),
+        mode: LaunchMode.externalApplication,
+      );
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open a browser')),
+        );
+      }
+    } catch (e) {
+      debugPrint('[Login/${_cfg.label}] external browser launch failed: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Could not open a browser')),
+        );
+      }
+    }
+  }
+
+  /// Reloads the login page to retry after the user has cleared the block in
+  /// their browser. Clears the blocked banner.
+  Future<void> _retryLogin() async {
+    setState(() {
+      _blocked = false;
+      _blockText = null;
+      _loading = true;
+    });
+    await _webController.loadRequest(Uri.parse(_cfg.loginUrl));
   }
 
   // ── Redirect loop recovery ────────────────────────────────────────────
 
   /// Called when ERR_TOO_MANY_REDIRECTS fires on the main frame.
   /// Captures the session from current cookies (before navigating away),
-  /// stops the loop by loading about:blank, shows an explanatory dialog,
-  /// then closes the login screen cleanly.
+  /// stops the loop by loading about:blank, then drops into the blocked state
+  /// so the user can verify in a real browser and retry.
   Future<void> _handleRedirectLoop() async {
     if (_captured) return;
 
     // Try to save the IG session that was set before the challenge fired.
-    bool sessionSaved = false;
     try {
       final rawCookies = await _readRawCookiesFromNative(_cfg.cookieDomain);
       if (rawCookies != null) {
@@ -250,7 +394,6 @@ class _LoginScreenState extends State<LoginScreen> {
             if (token.isNotEmpty) {
               _captured = true;
               await SessionService.saveSessionId(widget.platform, token);
-              sessionSaved = true;
               debugPrint('[Login/${_cfg.label}] session captured before redirect loop abort');
             }
             break;
@@ -264,34 +407,12 @@ class _LoginScreenState extends State<LoginScreen> {
     // Stop the redirect chain.
     await _webController.loadRequest(Uri.parse('about:blank'));
 
-    if (!mounted) return;
-
-    // Show dialog and AWAIT it — so Navigator.pop below runs after OK is tapped,
-    // not while the dialog is still the top route.
-    await showDialog<void>(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: const Text('Instagram Security Check Required'),
-        content: const Text(
-          'Instagram needs you to verify your account, but this '
-          'verification cannot complete inside the app browser.\n\n'
-          'Please:\n'
-          '1. Open Instagram in Chrome on this device\n'
-          '2. Log in and complete the verification there\n'
-          '3. Come back here and log in again',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('OK'),
-          ),
-        ],
-      ),
-    );
-
-    // Dialog dismissed — now close the login screen.
-    if (mounted) Navigator.of(context).pop(sessionSaved);
+    // A redirect loop is Instagram's security challenge blocking the WebView.
+    // Rather than force-closing the screen, drop into the same blocked state as
+    // a content block: keep the screen open and surface the "open in browser"
+    // escape hatch so the user can verify in real Chrome, then retry. (The IG
+    // session, if it was set before the challenge fired, is already saved.)
+    _enterBlockedState('security check required');
   }
 
   // ── Threads session capture (runs after IG login) ──────────────────────
@@ -491,6 +612,14 @@ class _LoginScreenState extends State<LoginScreen> {
       appBar: AppBar(
         title: Text('${_cfg.label} Login'),
         actions: [
+          // Always-available escape hatch: open the current page in the real
+          // browser (Chrome), where security challenges that the WebView can't
+          // complete will work.
+          IconButton(
+            icon: const Icon(Icons.open_in_browser),
+            tooltip: 'Open in browser',
+            onPressed: _openInExternalBrowser,
+          ),
           TextButton(
             onPressed: _logout,
             child: const Text('Logout'),
@@ -502,7 +631,77 @@ class _LoginScreenState extends State<LoginScreen> {
           WebViewWidget(controller: _webController),
           if (_loading)
             const Center(child: CircularProgressIndicator()),
+          if (_blocked) _buildBlockedBanner(context),
         ],
+      ),
+    );
+  }
+
+  /// Bottom banner shown when Instagram blocks the login/action. Keeps the
+  /// in-app browser visible and offers the escape hatch (open in real browser),
+  /// a retry, and a way to leave with whatever session was captured.
+  Widget _buildBlockedBanner(BuildContext context) {
+    final theme = Theme.of(context);
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: Material(
+        elevation: 8,
+        color: theme.colorScheme.surfaceContainerHighest,
+        child: SafeArea(
+          top: false,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Icon(Icons.block, color: theme.colorScheme.error, size: 20),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        'Instagram blocked this action',
+                        style: theme.textTheme.titleSmall,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Instagram is showing a security/"try again later" block '
+                  '("${_blockText ?? 'blocked'}") that can\'t be cleared inside '
+                  'this in-app browser. Open the page in your real browser, '
+                  'complete any verification, then come back and retry.',
+                  style: theme.textTheme.bodySmall,
+                ),
+                const SizedBox(height: 12),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [
+                    FilledButton.icon(
+                      onPressed: _openInExternalBrowser,
+                      icon: const Icon(Icons.open_in_browser, size: 18),
+                      label: const Text('Open in browser'),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _retryLogin,
+                      icon: const Icon(Icons.refresh, size: 18),
+                      label: const Text('Retry'),
+                    ),
+                    TextButton(
+                      onPressed: () => Navigator.of(context).pop(_captured),
+                      child: const Text('Close'),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

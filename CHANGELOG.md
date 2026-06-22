@@ -1,5 +1,15 @@
 # Changelog
 
+## [2026-06-23] — Session: v1.1 — login block detection & browser escape hatch
+
+### Added
+- feat(login): detect Instagram block / "try again later" / "open the Instagram app" interstitials on the login WebView. On each page load the page text is scanned for known block phrases; when one is found the in-app browser is **kept open** (instead of auto-closing) and a bottom banner explains the block and offers next steps. Context: when this IG account is also signed in from another app, Meta forces a re-verification / password refresh that can't be cleared inside a WebView ([3ba776f])
+- feat(login): "Open in browser" button — both an always-available AppBar action and a prominent button in the blocked banner — launches the current page in the real device browser (Chrome) via `url_launcher` `externalApplication`, where the security challenge can actually be completed. Banner also has Retry (reloads login) and Close (leaves with any captured session) ([3ba776f])
+
+### Changed
+- refactor(login): a redirect-loop security challenge (`ERR_TOO_MANY_REDIRECTS`) now routes into the same blocked-banner state instead of showing a one-shot dialog and force-closing the screen — the session (if set before the challenge) is still saved, but the user stays in control with the browser escape hatch. `_tryCaptureSession` gained an `autoPop` flag so a session can be saved silently without dismissing the screen while blocked ([3ba776f])
+- chore(release): bump to v1.1.0 ([3ba776f])
+
 ## [2026-06-13] — Session: Open author profile feed
 
 ### Added
