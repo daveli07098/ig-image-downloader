@@ -19,26 +19,32 @@
 #   ./scripts/bump-build.sh --minor         # +1 MINOR, BUILD=0 (1.0.2+4 → 1.1.0+0)
 #   ./scripts/bump-build.sh --major         # +1 MAJOR, BUILD=0 (1.1.0+4 → 2.0.0+0)
 #   ./scripts/bump-build.sh --no-commit     # bump + stage only (fold into a code commit)
-#   ./scripts/bump-build.sh --build         # bump + commit + build APK + adb install -r -d
+#   ./scripts/bump-build.sh --no-build      # bump + commit, but DON'T build/install
 #
-# Flags combine, e.g.:  ./scripts/bump-build.sh --patch --build
+# By default, after committing, the script auto-builds and installs onto the
+# connected device (Android APK + adb install, or iOS flutter install) — when no
+# device is connected it just builds a release APK. Pass --no-build to skip that.
+# --build is still accepted (now a no-op, kept for back-compat) since building is
+# the default. The build/install itself lives in scripts/build-install.sh.
+#
+# Flags combine, e.g.:  ./scripts/bump-build.sh --patch
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-ADB=~/Library/Android/sdk/platform-tools/adb
 PUBSPEC=pubspec.yaml
 HOME_SCREEN=lib/screens/home_screen.dart
 
 # ── Parse flags ───────────────────────────────────────────────────────────────
 LEVEL="build"        # build | patch | minor | major
 NO_COMMIT=0
-DO_BUILD=0
+DO_BUILD=1           # auto-build+install by default; --no-build turns it off
 for arg in "$@"; do
   case "$arg" in
     --major)     LEVEL="major" ;;
     --minor)     LEVEL="minor" ;;
     --patch)     LEVEL="patch" ;;
-    --build)     DO_BUILD=1 ;;
+    --build)     DO_BUILD=1 ;;   # back-compat no-op: building is now the default
+    --no-build)  DO_BUILD=0 ;;
     --no-commit) NO_COMMIT=1 ;;
     *) echo "Unknown flag: $arg" >&2; exit 1 ;;
   esac
@@ -79,54 +85,16 @@ if [[ "$NO_COMMIT" == "1" ]]; then
   echo "Staged version bump (${NEW_DISPLAY_VERSION}) — add these files to your commit:"
   echo "  $PUBSPEC"
   echo "  $HOME_SCREEN"
+  echo "After you commit, run ./scripts/build-install.sh to build + install on your device."
   exit 0
 fi
 git commit -m "chore: bump to ${NEW_DISPLAY_VERSION}"
 echo "Committed: $(git rev-parse --short HEAD)"
 
-# ── Optionally build + install on the connected device ───────────────────────
-# Detect whatever real device is plugged in and build for *its* platform —
-# Android phone/emulator → APK + adb install; iOS device/simulator → flutter
-# install. Physical devices are preferred over emulators/simulators. Falls back
-# to a plain Android APK build if no device is connected.
+# ── Auto build + install on the connected device (default) ───────────────────
+# Delegates to the shared build-install.sh: detects the connected device, builds
+# for its platform, and installs — or builds a release APK only when nothing is
+# connected. Skipped with --no-build.
 if [[ "$DO_BUILD" == "1" ]]; then
-  # Ask Flutter what is connected (JSON), then pick the best target with python.
-  # Output: "<id>\t<platformType>" (platformType = android | ios), empty if none.
-  DEVICES_JSON=$(fvm flutter devices --machine 2>/dev/null || echo '[]')
-  TARGET=$(printf '%s' "$DEVICES_JSON" | python3 -c '
-import json, sys
-try:
-    devs = json.load(sys.stdin)
-except Exception:
-    devs = []
-# Keep only installable mobile targets that Flutter can deploy to.
-cand = [d for d in devs
-        if d.get("platformType") in ("android", "ios") and d.get("isSupported", True)]
-# Prefer a physical device over an emulator/simulator; keep stable order otherwise.
-cand.sort(key=lambda d: 0 if not d.get("emulator", False) else 1)
-if cand:
-    d = cand[0]
-    print("{}\t{}".format(d.get("id", ""), d.get("platformType", "")))
-' 2>/dev/null || true)
-
-  DEVICE_ID="${TARGET%%$'\t'*}"
-  PLATFORM="${TARGET##*$'\t'}"
-
-  if [[ -z "$DEVICE_ID" ]]; then
-    echo "No connected device found — building a release APK only (not installing)…"
-    fvm flutter build apk --release
-    echo "Built ${NEW_DISPLAY_VERSION} APK → build/app/outputs/flutter-apk/app-release.apk"
-  elif [[ "$PLATFORM" == "android" ]]; then
-    echo "Android device '${DEVICE_ID}' detected — building release APK…"
-    fvm flutter build apk --release
-    echo "Installing (keeping app data, allowing versionCode downgrade)…"
-    ${ADB} -s "$DEVICE_ID" install -r -d build/app/outputs/flutter-apk/app-release.apk
-    echo "Installed ${NEW_DISPLAY_VERSION} on ${DEVICE_ID} (android)"
-  else
-    # iOS physical device or simulator: flutter install handles build + deploy
-    # without staying attached (unlike `flutter run`).
-    echo "iOS device '${DEVICE_ID}' detected — building + installing release…"
-    fvm flutter install --release -d "$DEVICE_ID"
-    echo "Installed ${NEW_DISPLAY_VERSION} on ${DEVICE_ID} (ios)"
-  fi
+  ./scripts/build-install.sh
 fi
