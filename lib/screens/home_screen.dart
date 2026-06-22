@@ -13,6 +13,7 @@ import '../services/session_service.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
 import 'login_screen.dart';
+import 'in_app_browser_screen.dart';
 import 'selection_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -372,6 +373,30 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             );
             if (result == true) await _refreshLoginState();
           },
+          // Open the platform's site in the in-app browser, signed in with the
+          // captured session, so the user can preview/scroll their feed.
+          onOpen: (platform) {
+            final nav = Navigator.of(context);
+            nav.pop(); // close the accounts sheet first
+            const homeUrls = {
+              LoginPlatform.instagram: 'https://www.instagram.com/',
+              LoginPlatform.x: 'https://x.com/home',
+              LoginPlatform.facebook: 'https://www.facebook.com/',
+            };
+            const labels = {
+              LoginPlatform.instagram: 'Instagram',
+              LoginPlatform.x: 'X',
+              LoginPlatform.facebook: 'Facebook',
+            };
+            nav.push(
+              MaterialPageRoute(
+                builder: (_) => InAppBrowserScreen(
+                  initialUrl: homeUrls[platform]!,
+                  title: labels[platform]!,
+                ),
+              ),
+            );
+          },
           onLogout: (platform) async {
             final messenger = ScaffoldMessenger.of(context);
             await SessionService.clearSession(platform);
@@ -422,7 +447,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.0',
+                    'v1.1.0.1',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -725,6 +750,7 @@ class _AccountsSheet extends StatelessWidget {
     this.fbUsername,
     required this.onLogin,
     required this.onLogout,
+    required this.onOpen,
   });
 
   final bool igLoggedIn;
@@ -735,6 +761,7 @@ class _AccountsSheet extends StatelessWidget {
   final String? fbUsername;
   final void Function(LoginPlatform) onLogin;
   final void Function(LoginPlatform) onLogout;
+  final void Function(LoginPlatform) onOpen;
 
   static const _platforms = [
     (platform: LoginPlatform.instagram, label: 'Instagram', icon: Icons.camera_alt_outlined),
@@ -781,6 +808,7 @@ class _AccountsSheet extends StatelessWidget {
                 username: usernames[p.platform],
                 onLogin: () => onLogin(p.platform),
                 onLogout: () => onLogout(p.platform),
+                onOpen: () => onOpen(p.platform),
               ),
               if (p != _platforms.last) const Divider(height: 1),
             ],
@@ -799,6 +827,7 @@ class _PlatformRow extends StatelessWidget {
     this.username,
     required this.onLogin,
     required this.onLogout,
+    required this.onOpen,
   });
 
   final IconData icon;
@@ -807,6 +836,7 @@ class _PlatformRow extends StatelessWidget {
   final String? username;
   final VoidCallback onLogin;
   final VoidCallback onLogout;
+  final VoidCallback onOpen;
 
   @override
   Widget build(BuildContext context) {
@@ -833,15 +863,24 @@ class _PlatformRow extends StatelessWidget {
               ],
             ),
           ),
-          isLoggedIn
-              ? OutlinedButton(
-                  onPressed: onLogout,
-                  child: const Text('Logout'),
-                )
-              : FilledButton(
-                  onPressed: onLogin,
-                  child: const Text('Login'),
-                ),
+          if (isLoggedIn) ...[
+            // Open the platform in the in-app browser (signed in) to preview pages.
+            IconButton(
+              onPressed: onOpen,
+              icon: const Icon(Icons.open_in_new),
+              tooltip: 'Open in app',
+              visualDensity: VisualDensity.compact,
+            ),
+            const SizedBox(width: 4),
+            OutlinedButton(
+              onPressed: onLogout,
+              child: const Text('Logout'),
+            ),
+          ] else
+            FilledButton(
+              onPressed: onLogin,
+              child: const Text('Login'),
+            ),
         ],
       ),
     );
