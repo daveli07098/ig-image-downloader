@@ -5,17 +5,15 @@ alwaysApply: true
 
 ## Knowledge Vault
 
-Route all content to `/Users/daveli/git/obsidian-ai-collab-vault/` automatically.
-No explicit path needed in prompts.
+This repo shares the Obsidian collaboration vault at `~/git/obsidian-ai-collab-vault/`.
 
-| Content | Destination |
-|---|---|
-| Research / summaries | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/research/YYYY-MM-DD-<slug>.md` |
-| Drafts / WIP | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/drafts/<slug>.md` |
-| Project memory | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/memory/projects/ig-image-downloader.md` |
-| Deliverables | `/Users/daveli/git/obsidian-ai-collab-vault/review/inbox/YYYY-MM-DD-<slug>.md` |
+All routing rules (where to save research, drafts, fixes, memory, deliverables) are defined
+**once** in the vault. Read and follow that contract — do not duplicate it here:
 
-- Use `/Users/daveli/git/obsidian-ai-collab-vault/integration/templates/note-template.md` as note base.
-- Set `project:` frontmatter to `ig-image-downloader`.
-- Confirm each save: "Saved to vault: `<relative-path>`"
-- Never write to `review/approved/`.
+→ `~/git/obsidian-ai-collab-vault/_integration/agent-guide.md`
+
+Set `project: ig-image-downloader` frontmatter on any note you save to the vault.
+`audience:` is always a YAML list (e.g. `[self]`, `[agent]`), never a bare string.
+Confirm each save with one line: `Saved to vault: <relative-path>`.
+
+Never write secrets into the vault except under `2-agent/secrets/` (git-ignored).

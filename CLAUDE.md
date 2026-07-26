@@ -99,20 +99,15 @@ Then amend the commit or make a separate `chore: update CHANGELOG` commit.
 
 ## Knowledge Vault
 
-All research, drafts, and persistent memory for this project go into the Obsidian vault at
-`/Users/daveli/git/obsidian-ai-collab-vault/`. Route content automatically — do not ask the user where to save, and do not
-require explicit vault paths in prompts.
+This repo shares the Obsidian collaboration vault at `~/git/obsidian-ai-collab-vault/`.
 
-| Content type | Save to |
-|---|---|
-| Web research, summaries, findings | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/research/YYYY-MM-DD-<slug>.md` |
-| WIP thinking, scratch, exploratory | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/drafts/<slug>.md` |
-| Persistent facts about this project | `/Users/daveli/git/obsidian-ai-collab-vault/ai-workspace/memory/projects/ig-image-downloader.md` |
-| Finished deliverables for human review | `/Users/daveli/git/obsidian-ai-collab-vault/review/inbox/YYYY-MM-DD-<slug>.md` |
+All routing rules (where to save research, drafts, fixes, memory, deliverables) are defined
+**once** in the vault. Read and follow that contract — do not duplicate it here:
 
-Rules:
-- Use `/Users/daveli/git/obsidian-ai-collab-vault/integration/templates/note-template.md` as the base for all new notes.
-- Set `project:` frontmatter to `ig-image-downloader`.
-- Never write to `review/approved/` — human domain only.
-- Never store secrets in the vault except under `ai-workspace/memory/secrets/` (git-ignored).
-- Confirm each save with one line: "Saved to vault: `<relative-path>`"
+→ `~/git/obsidian-ai-collab-vault/_integration/agent-guide.md`
+
+Set `project: ig-image-downloader` frontmatter on any note you save to the vault.
+`audience:` is always a YAML list (e.g. `[self]`, `[agent]`), never a bare string.
+Confirm each save with one line: `Saved to vault: <relative-path>`.
+
+Never write secrets into the vault except under `2-agent/secrets/` (git-ignored).
