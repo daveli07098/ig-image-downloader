@@ -447,7 +447,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.2',
+                    'v1.1.0.3',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -903,6 +903,10 @@ class _RateGuardBanner extends StatefulWidget {
 class _RateGuardBannerState extends State<_RateGuardBanner> {
   Timer? _ticker;
 
+  /// True while a manual "Check now" probe is in flight, so the affordance
+  /// can't be double-tapped into spamming Instagram.
+  bool _checkingNow = false;
+
   @override
   void initState() {
     super.initState();
@@ -911,12 +915,53 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
     // countdown updates without the user touching anything.
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) {
       RateGuard.instance.refresh();
+      // Fire a reprobe attempt every tick while a challenge cooldown is
+      // active — this does NOT mean Instagram gets hit every second:
+      // maybeReprobe() enforces its own 5-minute floor internally and only
+      // ever performs the actual network call once that's elapsed, so this
+      // is just a cheap timestamp check the other 299 times out of 300.
+      if (RateGuard.instance.status.isChallenge) {
+        RateGuard.instance.maybeReprobe();
+      }
       if (mounted) setState(() {});
     });
   }
 
   void _onChange() {
-    if (mounted) setState(() {});
+    if (!mounted) return;
+    // A successful reprobe (ticker-driven or manual) clears the cooldown via
+    // clearChallengeCooldown(early: true), which lands here through the
+    // listenable. Surface it once as a reminder rather than a second ticker.
+    if (RateGuard.instance.consumeEarlyRecovery()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+              'Instagram access recovered — downloads re-enabled.'),
+        ),
+      );
+    }
+    setState(() {});
+  }
+
+  Future<void> _checkNow() async {
+    if (_checkingNow) return;
+    setState(() => _checkingNow = true);
+    // force: true bypasses the 5-minute min-interval for this one tap only —
+    // it does NOT bypass the "must actually be in a challenge cooldown"
+    // guard inside maybeReprobe(), so it can't be used to probe Instagram
+    // outside a cooldown.
+    final recovered = await RateGuard.instance.maybeReprobe(force: true);
+    if (!mounted) return;
+    setState(() => _checkingNow = false);
+    // On recovery, _onChange already showed the reminder via listenable —
+    // avoid a duplicate SnackBar. Only report the "still blocked" outcome.
+    if (!recovered && RateGuard.instance.status.isChallenge) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Still blocked by Instagram — try again shortly.'),
+        ),
+      );
+    }
   }
 
   @override
@@ -957,9 +1002,14 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
           : '';
       if (status.isChallenge) {
         icon = Icons.gpp_maybe_rounded;
+        // Only the authenticated (logged-in) request path is paused here —
+        // public posts can still download via the HTML-scrape fallback, so
+        // "limited" is more accurate than "paused" (which implied nothing
+        // would download at all).
         text =
-            'Instagram flagged automated activity. Requests paused — open the '
-            'Instagram app, clear any prompt, then wait$left.';
+            'Instagram flagged automated activity. Logged-in requests are '
+            'limited — open the Instagram app, clear any prompt, then '
+            'wait$left. Public posts may still download.';
       } else {
         icon = Icons.timer_rounded;
         text =
@@ -991,6 +1041,31 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
                   color: fg, fontSize: 12.5, fontWeight: FontWeight.w500),
             ),
           ),
+          // Manual recovery check — only meaningful during an Instagram
+          // challenge cooldown; the plain hourly-budget block always clears
+          // on the timer alone, so there's nothing for a probe to check.
+          if (status.isChallenge) ...[
+            const SizedBox(width: 8),
+            _checkingNow
+                ? SizedBox(
+                    width: 16,
+                    height: 16,
+                    child: CircularProgressIndicator(
+                        strokeWidth: 2, color: fg),
+                  )
+                : TextButton(
+                    onPressed: _checkNow,
+                    style: TextButton.styleFrom(
+                      foregroundColor: fg,
+                      minimumSize: const Size(0, 0),
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: const Text('Check now',
+                        style: TextStyle(fontSize: 12.5)),
+                  ),
+          ],
         ],
       ),
     );

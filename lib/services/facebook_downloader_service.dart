@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
+import 'image_junk_filter.dart';
 
 /// Downloads media from Facebook posts, videos, and Reels.
 ///
@@ -134,9 +135,7 @@ class FacebookDownloaderService {
       } else if (property == 'og:image' ||
           property == 'og:image:url' ||
           property == 'og:image:secure_url') {
-        if (!content.contains('static.xx.fbcdn') &&
-            !content.contains('/rsrc.php/') &&
-            !ogImages.contains(content)) {
+        if (!isJunkUrl(content) && !ogImages.contains(content)) {
           ogImages.add(content);
         }
       } else if (property == 'og:type' && ogType == null) {
@@ -437,11 +436,7 @@ class FacebookDownloaderService {
               final img = imgRe.firstMatch(slice);
               if (img != null) {
                 final imgUrl = _unescape(img.group(1)!);
-                if (!imgUrl.contains('/profile') &&
-                    !imgUrl.contains('/rsrc') &&
-                    !imgUrl.contains('/emoji') &&
-                    !imgUrl.contains('static.xx.fbcdn') &&
-                    !allImages.contains(imgUrl)) {
+                if (!isJunkUrl(imgUrl) && !allImages.contains(imgUrl)) {
                   allImages.add(imgUrl);
                   phase1Count++;
                 }
@@ -456,11 +451,7 @@ class FacebookDownloaderService {
             if (allImages.length <= 1) {
               for (final m in imgRe.allMatches(mbasicHtml)) {
                 final imgUrl = _unescape(m.group(1)!);
-                if (!imgUrl.contains('/profile') &&
-                    !imgUrl.contains('/rsrc') &&
-                    !imgUrl.contains('/emoji') &&
-                    !imgUrl.contains('static.xx.fbcdn') &&
-                    !allImages.contains(imgUrl)) {
+                if (!isJunkUrl(imgUrl) && !allImages.contains(imgUrl)) {
                   allImages.add(imgUrl);
                 }
               }
@@ -741,10 +732,7 @@ class FacebookDownloaderService {
     for (final pattern in patterns) {
       for (final m in pattern.allMatches(html)) {
         final url = _unescape(m.group(1)!);
-        if (!url.contains('/profile') &&
-            !url.contains('/rsrc') &&
-            !url.contains('/emoji') &&
-            !url.contains('static.xx.fbcdn') &&
+        if (!isJunkUrl(url) &&
             _ncCatMatches(url, refNcCat) &&
             seen.add(url)) {
           existing.add(url);

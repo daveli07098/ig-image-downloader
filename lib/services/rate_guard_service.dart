@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'session_service.dart';
 
 /// Severity of the current rate situation, used to pick the banner colour/copy.
 enum RateLevel {
@@ -109,14 +111,42 @@ class RateGuard {
   /// Long and deliberate: hammering through a soft flag is what escalates it.
   static const Duration challengeCooldown = Duration(hours: 2);
 
+  /// Minimum spacing between recovery-probe attempts, enforced independently
+  /// of the hourly call budget and persisted so it survives a restart. This
+  /// guarantees the probe can NEVER itself contribute to a fresh automation
+  /// flag by re-checking Instagram too often while a cooldown is active —
+  /// the whole point of probing is to detect recovery without becoming the
+  /// thing that re-triggers the block.
+  static const Duration probeMinInterval = Duration(minutes: 5);
+
+  // User-agent / app-id for the lightweight probe request. Duplicated from
+  // DownloaderService's private-API constants rather than imported from it
+  // (mirrors ThreadsDownloaderService's existing convention of keeping its
+  // own copy) — RateGuard must not depend on DownloaderService, which already
+  // depends on RateGuard, to avoid a import cycle.
+  static const _probeUA =
+      'Instagram 219.0.0.12.117 Android (26/8.0.0; 480dpi; 1080x1920; '
+      'OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)';
+  static const _probeAppId = '936619743392459';
+
   static const _callsKey = 'rate_api_call_ts';
   static const _cooldownKey = 'rate_challenge_until';
+  static const _lastProbeKey = 'rate_last_probe_ts';
 
   /// Epoch-ms timestamps of recent authenticated calls (trimmed to [window]).
   final List<int> _callTs = [];
 
   /// Epoch-ms until which an Instagram-imposed cooldown is active, or null.
   int? _challengeUntilMs;
+
+  /// Epoch-ms of the last recovery-probe attempt, or null if none yet.
+  int? _lastProbeMs;
+
+  /// One-shot flag set when a cooldown was lifted by a successful reprobe
+  /// (Instagram recovered before the fixed timer ran out) rather than by the
+  /// timer simply expiring. The UI reads this via [consumeEarlyRecovery] to
+  /// decide whether to show the "access recovered" reminder.
+  bool _earlyRecoveryPending = false;
 
   /// Reactive handle the UI listens to for live banner updates.
   final ValueNotifier<RateGuardStatus> listenable =
@@ -147,6 +177,7 @@ class RateGuard {
     }
     final until = prefs.getInt(_cooldownKey);
     if (until != null) _challengeUntilMs = until;
+    _lastProbeMs = prefs.getInt(_lastProbeKey);
     _loaded = true;
     _recompute();
   }
@@ -193,6 +224,105 @@ class RateGuard {
   /// recovers and any cooldown clears on screen without a manual refresh).
   void refresh() => _recompute();
 
+  /// Lifts an active challenge cooldown immediately. [early] marks the lift
+  /// as evidence-based recovery (a successful [maybeReprobe]) rather than the
+  /// fixed timer expiring, which sets the one-shot [consumeEarlyRecovery] flag
+  /// the UI uses to show a reminder.
+  Future<void> clearChallengeCooldown({bool early = false}) async {
+    if (_challengeUntilMs == null) return; // nothing to clear
+    _challengeUntilMs = null;
+    if (early) _earlyRecoveryPending = true;
+    _recompute();
+    await _persist();
+  }
+
+  /// Returns true exactly once per early-recovery event, then resets. The UI
+  /// calls this from its existing change listener to decide whether to show
+  /// the "Instagram access recovered" reminder.
+  bool consumeEarlyRecovery() {
+    if (!_earlyRecoveryPending) return false;
+    _earlyRecoveryPending = false;
+    return true;
+  }
+
+  /// While a challenge cooldown is active, makes ONE lightweight authenticated
+  /// probe to check whether Instagram access has actually recovered, so the
+  /// banner can clear as soon as it's true rather than waiting out the full
+  /// fixed [challengeCooldown]. Fails closed: the cooldown is left untouched
+  /// on pushback, a network error, or any ambiguous result — it is only ever
+  /// lifted by a clean response.
+  ///
+  /// [force] bypasses [probeMinInterval] for a manual "Check now" tap; it does
+  /// NOT bypass the "only probe while actually blocked" check, so it can't be
+  /// used to spam Instagram outside a cooldown.
+  ///
+  /// Returns true when the probe found access recovered (and lifted the
+  /// cooldown), false otherwise (still blocked, throttled, no session, or a
+  /// transport error).
+  Future<bool> maybeReprobe({bool force = false}) async {
+    _recompute();
+    if (!listenable.value.isChallenge) return false; // nothing to probe
+
+    final now = DateTime.now().millisecondsSinceEpoch;
+    if (!force &&
+        _lastProbeMs != null &&
+        now - _lastProbeMs! < probeMinInterval.inMilliseconds) {
+      return false; // too soon since the last probe — never hammer Instagram
+    }
+
+    final sessionId =
+        await SessionService.getSessionId(LoginPlatform.instagram);
+    if (sessionId == null) return false; // can't probe without a session
+
+    // Record the attempt (and persist it) BEFORE the network call so a crash
+    // or timeout still counts against the min-interval — the guarantee is
+    // "at most one probe per interval attempted", not "per interval succeeded".
+    _lastProbeMs = now;
+    await _persist();
+
+    try {
+      // A standalone Dio instance scoped to this single request — RateGuard
+      // intentionally does not share DownloaderService's client to keep the
+      // two services decoupled (see the UA/app-id comment above).
+      final probeDio = Dio(BaseOptions(
+        connectTimeout: const Duration(seconds: 10),
+        receiveTimeout: const Duration(seconds: 15),
+        headers: {
+          'User-Agent': _probeUA,
+          'X-IG-App-ID': _probeAppId,
+          'X-IG-Capabilities': '3brTvwE=',
+          'Accept-Language': 'en-US',
+          'Accept': 'application/json',
+        },
+      ));
+      // accounts/current_user/ is the lightest authenticated endpoint that
+      // still surfaces a challenge/checkpoint wall — unlike media/info/ it
+      // needs no target post, so RateGuard (which has no shortcode/media ID
+      // context) can call it standalone. Deliberately NOT recorded via
+      // recordApiCall(): it's a single call every 5+ minutes at most, far
+      // below the hourly budget's purpose of catching runaway bursts, and
+      // counting it would falsely eat into a budget the user's own actions
+      // didn't spend.
+      final resp = await probeDio.get<String>(
+        'https://i.instagram.com/api/v1/accounts/current_user/?edit=true',
+        options: Options(headers: {'Cookie': 'sessionid=$sessionId'}),
+      );
+      final body = (resp.data ?? '').toLowerCase();
+      if (isPushback(resp.statusCode, body)) {
+        return false; // still flagged — leave the cooldown untouched
+      }
+      await clearChallengeCooldown(early: true);
+      return true;
+    } on DioException catch (_) {
+      // Covers non-2xx responses (incl. a genuine 429/challenge) and network
+      // failures alike — either way this is not clean evidence of recovery,
+      // so fail closed and leave the cooldown exactly as it was.
+      return false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   // ── internals ──────────────────────────────────────────────────────────────
 
   void _recompute() {
@@ -236,6 +366,26 @@ class RateGuard {
     } else {
       await prefs.remove(_cooldownKey);
     }
+    if (_lastProbeMs != null) {
+      await prefs.setInt(_lastProbeKey, _lastProbeMs!);
+    }
+  }
+
+  /// True when an `i.instagram.com` response indicates Instagram is pushing
+  /// back on automation: a 429 (too many requests) or a challenge/checkpoint/
+  /// login wall — which Instagram returns with either an error status OR a
+  /// 200 carrying a `"status":"fail"` body. Treated as a hard signal to back
+  /// off, since hammering through it is what escalates a soft flag.
+  ///
+  /// Shared by [DownloaderService] (which trips [triggerChallengeCooldown] on
+  /// a real request) and [maybeReprobe] (which relies on it to tell a clean
+  /// recovery from a still-blocked probe) so the two never drift apart.
+  static bool isPushback(int? statusCode, String lowerBody) {
+    if (statusCode == 429) return true;
+    return lowerBody.contains('checkpoint_required') ||
+        lowerBody.contains('challenge_required') ||
+        lowerBody.contains('login_required') ||
+        lowerBody.contains('please wait a few minutes');
   }
 
   /// Human-readable "in 5 min" / "in 1 h 12 min" from now until [until].

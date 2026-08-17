@@ -258,19 +258,8 @@ class DownloaderService {
   }
 
   // ── Strategy 0: Instagram private API ──────────────────────────────────
-
-  /// True when an `i.instagram.com` response indicates Instagram is pushing
-  /// back on automation: a 429 (too many requests) or a challenge/checkpoint/
-  /// login wall — which Instagram returns with either an error status OR a
-  /// 200 carrying a `"status":"fail"` body. Treated as a hard signal to back
-  /// off, since hammering through it is what escalates a soft flag.
-  static bool _isPushback(int? statusCode, String lowerBody) {
-    if (statusCode == 429) return true;
-    return lowerBody.contains('checkpoint_required') ||
-        lowerBody.contains('challenge_required') ||
-        lowerBody.contains('login_required') ||
-        lowerBody.contains('please wait a few minutes');
-  }
+  // Pushback detection (`RateGuard.isPushback`) lives in rate_guard_service.dart
+  // so it's shared with RateGuard's own recovery probe instead of duplicated.
 
   /// Extracts the shortcode from an Instagram URL.
   /// Handles /p/, /reel/, /tv/ paths.
@@ -330,7 +319,7 @@ class DownloaderService {
     } on DioException catch (e) {
       final code = e.response?.statusCode;
       final body = e.response?.data?.toString().toLowerCase() ?? '';
-      if (_isPushback(code, body)) {
+      if (RateGuard.isPushback(code, body)) {
         await RateGuard.instance.triggerChallengeCooldown();
         throw Exception(
           'Instagram flagged automated activity (HTTP $code). Requests are '
@@ -345,7 +334,7 @@ class DownloaderService {
 
     // A 200 can still carry a soft challenge/login wall in its JSON body.
     final lowerBody = resp.data!.toLowerCase();
-    if (_isPushback(resp.statusCode, lowerBody)) {
+    if (RateGuard.isPushback(resp.statusCode, lowerBody)) {
       await RateGuard.instance.triggerChallengeCooldown();
       throw Exception(
         'Instagram flagged automated activity. Requests are paused to protect '

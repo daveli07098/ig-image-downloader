@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:html/dom.dart' as dom;
 import '../models/media_item.dart';
+import 'image_junk_filter.dart';
 import 'js_challenge_detector.dart';
 
 /// Internal signal thrown by [GenericArticleDownloaderService._fetchPlain]
@@ -38,7 +39,8 @@ class GenericArticleDownloaderService {
       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   // CSS selectors tried in order — first match wins. Covers common news themes,
-  // WordPress, and generic semantic markup.
+  // WordPress, generic semantic markup, and Tumblr (which has no dedicated
+  // scraper and always falls through to this one).
   static const _contentSelectors = [
     '.td-post-content',          // Newspaper / tagDiv theme
     '.entry-content',            // Genesis, Twenty-*, most WP themes
@@ -48,15 +50,10 @@ class GenericArticleDownloaderService {
     '.story-body',
     '.post__content',
     '[itemprop="articleBody"]',
+    '[data-post-id]',            // Tumblr post wrapper (React/lazy-loaded themes)
+    '.post',                     // Tumblr's own generic post container
     'article',                   // HTML5 semantic
     'main',                      // last structural fallback before <body>
-  ];
-
-  // src/href substrings that mark an image as chrome rather than content.
-  static const _junkMarkers = [
-    'avatar', 'gravatar', 'logo', 'icon', 'favicon', 'sprite', 'emoji',
-    'placeholder', 'spacer', 'blank.', '1x1', 'pixel', 'tracking', 'beacon',
-    'loading', 'spinner', 'data:image',
   ];
 
   final Dio _dio;
@@ -247,22 +244,79 @@ class GenericArticleDownloaderService {
     final out = <String>[];
 
     for (final img in scope.querySelectorAll('img')) {
-      // Skip tiny declared sizes (icons/spacers) when width/height are present.
-      final w = int.tryParse(img.attributes['width'] ?? '');
-      final h = int.tryParse(img.attributes['height'] ?? '');
-      if ((w != null && w < 150) || (h != null && h < 150)) continue;
-
       final best = _bestImgSrc(img);
-      if (best != null && !_isJunk(best)) out.add(best);
+      if (best == null) continue;
+      if (_looksTinyBySize(img, best)) continue;
+      if (isJunkElement(
+        url: best,
+        className: img.attributes['class'],
+        id: img.attributes['id'],
+        alt: img.attributes['alt'],
+      )) {
+        continue;
+      }
+      out.add(best);
     }
 
     // <picture><source srcset="..."> — used by many news CMSes for hi-res.
     for (final source in scope.querySelectorAll('picture source[srcset]')) {
       final best = _largestFromSrcset(source.attributes['srcset'] ?? '');
-      if (best != null && !_isJunk(best)) out.add(best);
+      if (best != null && !isJunkUrl(best)) out.add(best);
     }
 
     return out;
+  }
+
+  // URL patterns that hint at a small CDN-served thumbnail size, used as a
+  // last-resort size signal when neither width/height attributes nor an
+  // inline style declare a size (Tumblr's React/lazy-loaded markup usually
+  // omits both). "75x75", "s150x150", "_128." style path segments and
+  // "?w=48"/"&width=32" resize query params are the common conventions.
+  static final RegExp _urlDimensionRe = RegExp(r'(\d{2,4})x(\d{2,4})');
+  static final RegExp _urlQuerySizeRe =
+      RegExp(r'[?&](?:w|width|s|size)=(\d{2,4})(?:&|$)', caseSensitive: false);
+  static final RegExp _styleDimensionRe =
+      RegExp(r'(width|height)\s*:\s*(\d{1,4})px', caseSensitive: false);
+
+  /// Returns true only when a size signal — declared width/height attributes,
+  /// an inline `style` width/height, or a small-size hint baked into the
+  /// resolved URL — positively indicates a tiny (icon/avatar) image.
+  ///
+  /// When NO signal is available at all (the width/height attributes are
+  /// absent — normal for Tumblr's React/lazy-loaded markup — and there is no
+  /// inline style or URL size hint either), this returns false: an unknown
+  /// size must never be treated as "small". Dropping a real content image on
+  /// a false positive here loses user content, which is worse than letting
+  /// an extra avatar through for [isJunkElement] to catch instead.
+  static bool _looksTinyBySize(dom.Element img, String resolvedSrc) {
+    final w = int.tryParse(img.attributes['width'] ?? '');
+    final h = int.tryParse(img.attributes['height'] ?? '');
+    if (w != null && w < 150) return true;
+    if (h != null && h < 150) return true;
+    if (w != null || h != null) return false; // one dimension known, >= 150
+
+    final style = img.attributes['style'];
+    if (style != null && style.isNotEmpty) {
+      for (final m in _styleDimensionRe.allMatches(style)) {
+        final n = int.tryParse(m.group(2)!);
+        if (n != null && n < 150) return true;
+      }
+    }
+
+    final qm = _urlQuerySizeRe.firstMatch(resolvedSrc);
+    if (qm != null) {
+      final n = int.tryParse(qm.group(1)!);
+      if (n != null && n < 150) return true;
+    }
+    final dm = _urlDimensionRe.firstMatch(resolvedSrc);
+    if (dm != null) {
+      final dw = int.tryParse(dm.group(1)!);
+      final dh = int.tryParse(dm.group(2)!);
+      if (dw != null && dh != null && dw < 150 && dh < 150) return true;
+    }
+
+    // Nothing knowable — keep accepting; see doc comment above.
+    return false;
   }
 
   /// Best available URL for one <img>: prefer a lazy-load data-* attr, then the
@@ -304,12 +358,6 @@ class GenericArticleDownloaderService {
       }
     }
     return best;
-  }
-
-  static bool _isJunk(String url) {
-    final lower = url.toLowerCase();
-    if (lower.endsWith('.svg')) return true;
-    return _junkMarkers.any(lower.contains);
   }
 
   /// Resolves a possibly-relative/protocol-relative URL against [pageUrl].
