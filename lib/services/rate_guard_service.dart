@@ -237,6 +237,7 @@ class RateGuard {
   static const _reasonKey = 'rate_challenge_reason';
   static const _httpStatusKey = 'rate_challenge_http_status';
   static const _trippedAtKey = 'rate_challenge_at';
+  static const _sessionFpKey = 'rate_challenge_session_fp';
   // Backoff escalation state. Unlike the cooldown diagnostics above (which
   // live and die with the active cooldown), these must SURVIVE the cooldown
   // clearing — escalation is decided by comparing the next trip against the
@@ -261,6 +262,16 @@ class RateGuard {
 
   /// Epoch-ms at which the active cooldown was tripped, or null.
   int? _challengeAtMs;
+
+  /// Fingerprint (hash + length — NEVER the value) of the Instagram session
+  /// that an AUTH-wall cooldown tripped against, or null. Compared against
+  /// the session a later probe succeeds with, so field logs can answer
+  /// whether `login_required` can occur transiently on a still-valid session
+  /// (probe clears with the session UNCHANGED) or only ever means the session
+  /// died (cleared after it was REPLACED). Persisted with the other cooldown
+  /// diagnostics; the fingerprint is one-way, so persisting/logging it never
+  /// exposes the session itself.
+  String? _challengeSessionFp;
 
   /// Epoch-ms of the last recovery-probe attempt, or null if none yet.
   int? _lastProbeMs;
@@ -331,6 +342,7 @@ class RateGuard {
     _challengeReason = PushbackReason.fromCode(prefs.getString(_reasonKey));
     _challengeHttpStatus = prefs.getInt(_httpStatusKey);
     _challengeAtMs = prefs.getInt(_trippedAtKey);
+    _challengeSessionFp = prefs.getString(_sessionFpKey);
     _lastProbeMs = prefs.getInt(_lastProbeKey);
     _escalationLevel = prefs.getInt(_escalationLevelKey) ?? 0;
     _lastTripMs = prefs.getInt(_lastTripKey);
@@ -423,12 +435,28 @@ class RateGuard {
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
     final isAuth = reason?.isAuthFailure ?? false;
+    // Drop any fingerprint from a previous cooldown — only an AUTH trip
+    // records one (below), and a stale value would mislabel the next clear.
+    _challengeSessionFp = null;
     final Duration cooldown;
     if (isAuth) {
       // Session rejected — an authentication problem, not automation
       // pushback. Short anti-hammer pause only; the ladder's level and
       // clean-time clock stay untouched.
       cooldown = authCooldown;
+      // Fingerprint (never the value) the session this auth wall tripped
+      // against, so a later probe success can log whether the wall cleared on
+      // the SAME session (login_required was transient) or only after the
+      // user replaced it. Best-effort: a read failure just loses the log
+      // distinction, never the cooldown itself.
+      try {
+        final sid =
+            await SessionService.getSessionId(LoginPlatform.instagram);
+        _challengeSessionFp =
+            sid == null ? null : sessionFingerprint(sid);
+      } catch (_) {
+        _challengeSessionFp = null;
+      }
     } else {
       if (_lastTripMs == null) {
         _escalationLevel = 0; // first trip ever — base cooldown
@@ -480,15 +508,17 @@ class RateGuard {
   void refresh() => _recompute();
 
   /// Lifts an active challenge cooldown immediately. [early] marks the lift
-  /// as evidence-based recovery (a successful [maybeReprobe]) rather than the
+  /// as evidence-based recovery (a successful [maybeReprobe] or a clean
+  /// authenticated call, see [noteAuthenticatedSuccess]) rather than the
   /// fixed timer expiring, which sets the one-shot [consumeEarlyRecovery] flag
-  /// the UI uses to show a reminder.
-  Future<void> clearChallengeCooldown({bool early = false}) async {
+  /// the UI uses to show a reminder. [cause] overrides the default log label
+  /// so field logs show WHICH evidence lifted the block.
+  Future<void> clearChallengeCooldown({bool early = false, String? cause}) async {
     if (_challengeUntilMs == null) return; // nothing to clear
     // Distinguish evidence-based early recovery (probe succeeded) from an
     // explicit clear, so field logs show whether auto-recovery actually works.
     debugPrint('[RateGuard] Cooldown CLEARED '
-        '(${early ? 'early — recovery probe succeeded' : 'explicit clear'}): '
+        '(${cause ?? (early ? 'early — recovery probe succeeded' : 'explicit clear')}): '
         'was reason=${_challengeReason?.code ?? 'unknown'} '
         'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
     // The clean period toward an escalation reset starts NOW — the cooldown
@@ -505,33 +535,51 @@ class RateGuard {
     await _persist();
   }
 
+  /// Call after any SUCCESSFUL authenticated call to `i.instagram.com` — a
+  /// clean response is definitional proof the premise of any active block is
+  /// gone (stronger evidence than the synthetic probe, which hits a different
+  /// endpoint). Clears an active challenge cooldown — including the
+  /// `login_required` auth state, which a working authenticated call directly
+  /// disproves. Idempotent no-op when nothing is set.
+  Future<void> noteAuthenticatedSuccess() async {
+    if (_challengeUntilMs == null) return; // nothing to clear — common case
+    debugPrint('[RateGuard] Cleared by successful authenticated call');
+    await clearChallengeCooldown(
+        early: true, cause: 'successful authenticated call');
+  }
+
   /// Call after a NEW Instagram session is successfully captured (login flow).
-  /// A fresh session invalidates the premise of any active cooldown — most
-  /// obviously a `login_required` auth wall (field-verified: the old behaviour
-  /// let a 2 h cooldown survive a re-login, refusing the private API on a
-  /// perfectly valid session) — and stales the escalation ladder, whose
-  /// evidence was gathered against the old session. Clears both and resets
-  /// the ladder to first-trip state.
+  ///
+  /// A fresh session unconditionally invalidates the premise of an AUTH-wall
+  /// cooldown (`login_required` — field-verified: the old behaviour let a 2 h
+  /// cooldown survive a re-login, refusing the private API on a perfectly
+  /// valid session), so that state is cleared outright.
+  ///
+  /// Genuine throttle/automation cooldowns (429 / please_wait / checkpoint /
+  /// challenge) are NOT blind-cleared and the escalation ladder is left
+  /// untouched: a fresh cookie does not disprove a 429 — the flag is on the
+  /// account/device pressure, not the session. Instead this fires an
+  /// immediate evidence-based reprobe ([maybeReprobe] `force: true`, which
+  /// fails closed and is ladder-neutral) and lets the result decide.
   Future<void> onSessionRefreshed() async {
-    final hadCooldown = _challengeUntilMs != null;
-    final hadLadderState =
-        _escalationLevel != 0 || _lastTripMs != null || _cooldownEndedMs != null;
-    if (!hadCooldown && !hadLadderState) return; // nothing to reset
-    if (hadCooldown) {
-      debugPrint('[RateGuard] Cooldown CLEARED (new session captured): '
-          'was reason=${_challengeReason?.code ?? 'unknown'} '
+    if (_challengeUntilMs == null) return; // no active cooldown — nothing to do
+    if (_challengeReason?.isAuthFailure ?? false) {
+      debugPrint('[RateGuard] Cooldown CLEARED (new session captured — '
+          'auth wall disproven): was reason=${_challengeReason?.code} '
           'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
       _challengeUntilMs = null;
       _clearChallengeMeta();
+      _recompute();
+      await _persist();
+      return;
     }
-    // Full ladder reset — the next trip (if any) starts back at the base
-    // cooldown, exactly like a first-ever trip. _persist removes the nulled
-    // keys so the reset survives a restart.
-    _escalationLevel = 0;
-    _lastTripMs = null;
-    _cooldownEndedMs = null;
-    _recompute();
-    await _persist();
+    // Throttle (or unknown-reason) cooldown: probe instead of clearing.
+    // Fire-and-forget so the login flow isn't held hostage by a network call;
+    // an eventual probe success clears via clearChallengeCooldown(early:true).
+    debugPrint('[RateGuard] New session captured during a '
+        '${_challengeReason?.code ?? 'unknown'} cooldown — NOT clearing '
+        '(a fresh cookie does not disprove throttling); forcing a reprobe');
+    unawaited(maybeReprobe(force: true));
   }
 
   /// Returns true exactly once per early-recovery event, then resets. The UI
@@ -548,7 +596,16 @@ class RateGuard {
   /// banner can clear as soon as it's true rather than waiting out the full
   /// fixed [challengeCooldown]. Fails closed: the cooldown is left untouched
   /// on pushback, a network error, or any ambiguous result — it is only ever
-  /// lifted by a clean response.
+  /// lifted by a clean response. Ladder-neutral by construction: a failed
+  /// probe never calls [triggerChallengeCooldown], so probing can never
+  /// deepen the very block it is checking.
+  ///
+  /// Runs for EVERY challenge-cooldown flavour — throttle/automation walls
+  /// AND the `login_required` auth state — using the currently stored cookie.
+  /// A probe success while in the auth state clears it, and logs whether the
+  /// session was UNCHANGED since the wall tripped (login_required was
+  /// transient on a still-valid session) or REPLACED by a re-login in the
+  /// meantime — compared by fingerprint only, never the value.
   ///
   /// [force] bypasses [probeMinInterval] for a manual "Check now" tap; it does
   /// NOT bypass the "only probe while actually blocked" check, so it can't be
@@ -608,6 +665,22 @@ class RateGuard {
       final body = (resp.data ?? '').toLowerCase();
       if (isPushback(resp.statusCode, body)) {
         return false; // still flagged — leave the cooldown untouched
+      }
+      // For an AUTH wall, record whether the session the probe just succeeded
+      // with is the SAME one the wall tripped against — answered by
+      // fingerprint (hash + length, never the value). UNCHANGED means
+      // login_required occurred transiently on a still-valid session;
+      // REPLACED means a re-login happened in between. Logged BEFORE the
+      // clear because clearing drops the recorded fingerprint with the rest
+      // of the cooldown metadata.
+      if (_challengeReason?.isAuthFailure ?? false) {
+        final trippedFp = _challengeSessionFp;
+        final probeFp = sessionFingerprint(sessionId);
+        final verdict = trippedFp == null
+            ? 'UNKNOWN (no fingerprint recorded at trip)'
+            : (probeFp == trippedFp ? 'UNCHANGED' : 'REPLACED');
+        debugPrint('[RateGuard] AUTH cleared — session $verdict '
+            '(fingerprint ${trippedFp ?? '-'} → $probeFp)');
       }
       await clearChallengeCooldown(early: true);
       return true;
@@ -678,6 +751,20 @@ class RateGuard {
     _challengeReason = null;
     _challengeHttpStatus = null;
     _challengeAtMs = null;
+    _challengeSessionFp = null;
+  }
+
+  /// One-way fingerprint of a session value for log-only comparison: a short
+  /// polynomial hash plus the length (e.g. `a3b2c1/43ch`). NEVER the session
+  /// itself, and not reversible — safe to persist and to print. Two equal
+  /// fingerprints ⇒ same session for all practical logging purposes; the
+  /// value cannot be recovered from it.
+  static String sessionFingerprint(String sessionId) {
+    var h = 0;
+    for (final c in sessionId.codeUnits) {
+      h = ((h * 31) + c) & 0xFFFFFF;
+    }
+    return '${h.toRadixString(16).padLeft(6, '0')}/${sessionId.length}ch';
   }
 
   /// The active cooldown's trip time as a log-friendly string.
@@ -699,8 +786,10 @@ class RateGuard {
     // Backoff escalation state — outlives any individual cooldown by design
     // (see the key comments). A stale level is harmless: the reset-vs-escalate
     // decision at the next trip compares against _cooldownEndedMs anyway.
-    // The null branches matter for onSessionRefreshed's full ladder reset —
-    // without the removes, a restart would resurrect the pre-reset ladder.
+    // The null branches keep the persisted state consistent with memory: any
+    // future path that nulls a ladder field must not have a restart resurrect
+    // the old value. (onSessionRefreshed used to blind-reset the ladder here;
+    // it no longer does — throttle history now survives a re-login.)
     await prefs.setInt(_escalationLevelKey, _escalationLevel);
     if (_lastTripMs != null) {
       await prefs.setInt(_lastTripKey, _lastTripMs!);
@@ -727,6 +816,13 @@ class RateGuard {
       await prefs.setInt(_trippedAtKey, _challengeAtMs!);
     } else {
       await prefs.remove(_trippedAtKey);
+    }
+    // One-way session fingerprint (hash+length) — not a secret; see
+    // sessionFingerprint. Lives and dies with the auth-wall cooldown.
+    if (_challengeSessionFp != null) {
+      await prefs.setString(_sessionFpKey, _challengeSessionFp!);
+    } else {
+      await prefs.remove(_sessionFpKey);
     }
   }
 

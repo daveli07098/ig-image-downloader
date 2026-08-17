@@ -234,9 +234,10 @@ class _LoginScreenState extends State<LoginScreen> {
     if (token != null && token.isNotEmpty) {
       _captured = true;
       await SessionService.saveSessionId(widget.platform, token);
-      // A fresh Instagram session invalidates any RateGuard cooldown that was
-      // tripped against the OLD session (most importantly a login_required
-      // auth wall — waiting it out was pointless, re-login is the fix).
+      // A fresh Instagram session clears a login_required auth wall outright
+      // (waiting it out was pointless, re-login IS the fix); for genuine
+      // throttle cooldowns it instead fires an evidence-based reprobe — a
+      // fresh cookie doesn't disprove a 429 (see RateGuard.onSessionRefreshed).
       if (widget.platform == LoginPlatform.instagram) {
         await RateGuard.instance.onSessionRefreshed();
       }
@@ -398,8 +399,8 @@ class _LoginScreenState extends State<LoginScreen> {
             if (token.isNotEmpty) {
               _captured = true;
               await SessionService.saveSessionId(widget.platform, token);
-              // Same as _tryCaptureSession: a new session stales any active
-              // RateGuard cooldown tripped against the old one.
+              // Same as _tryCaptureSession: a new session clears an auth-wall
+              // cooldown outright and reprobes (not clears) a throttle one.
               if (widget.platform == LoginPlatform.instagram) {
                 await RateGuard.instance.onSessionRefreshed();
               }

@@ -4,6 +4,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
+import '../models/fetch_result.dart';
 import '../models/media_item.dart';
 import 'download_ledger_service.dart';
 import 'facebook_downloader_service.dart';
@@ -99,12 +100,16 @@ class DownloaderService {
 
   // ── 1.  Fetch all media items from a URL (IG or X) ──────────────────────
 
-  Future<List<MediaItem>> fetchItems(
+  /// Returns a [FetchResult] rather than a bare item list so the Instagram
+  /// path can flag a degraded (possibly-incomplete) Strategy B result — see
+  /// [FetchResult.degradedReason]. Every non-Instagram branch is inherently
+  /// non-degraded and wraps its list as-is.
+  Future<FetchResult> fetchItems(
     String url, {
     Future<String> Function(String url)? renderedHtmlFallback,
   }) async {
     if (XDownloaderService.isXUrl(url)) {
-      return XDownloaderService().fetchItems(url);
+      return FetchResult(items: await XDownloaderService().fetchItems(url));
     }
     if (ThreadsDownloaderService.isThreadsUrl(url)) {
       // Pass both sessions: IG session for i.instagram.com API (Threads app approach),
@@ -112,13 +117,16 @@ class DownloaderService {
       final igSessionId =
           await SessionService.getSessionId(LoginPlatform.instagram);
       final threadsSessionId = await SessionService.getThreadsSessionId();
-      return ThreadsDownloaderService().fetchItems(url,
-          igSessionId: igSessionId, threadsSessionId: threadsSessionId);
+      return FetchResult(
+          items: await ThreadsDownloaderService().fetchItems(url,
+              igSessionId: igSessionId, threadsSessionId: threadsSessionId));
     }
     if (FacebookDownloaderService.isFacebookUrl(url)) {
       final fbCookies =
           await SessionService.getSessionId(LoginPlatform.facebook);
-      return FacebookDownloaderService().fetchItems(url, fbCookies: fbCookies);
+      return FetchResult(
+          items: await FacebookDownloaderService()
+              .fetchItems(url, fbCookies: fbCookies));
     }
     if (!IgUrlParser.isInstagramUrl(url)) {
       // Direct media link (e.g. a raw CDN .jpg/.mp4 URL shared straight out of
@@ -128,7 +136,7 @@ class DownloaderService {
       if (_looksLikeDirectMediaUrl(url)) {
         final host = Uri.tryParse(url)?.host ?? 'media';
         final siteName = host.replaceFirst('www.', '').replaceAll('.', '_');
-        return [
+        return FetchResult(items: [
           MediaItem(
             id: '0',
             mediaUrl: url,
@@ -139,12 +147,13 @@ class DownloaderService {
             username: siteName,
             itemIndex: 1,
           ),
-        ];
+        ]);
       }
       // Not IG, X, Threads, or Facebook — try generic article extraction
-      return GenericArticleDownloaderService(
+      return FetchResult(
+          items: await GenericArticleDownloaderService(
         renderedHtmlFallback: renderedHtmlFallback,
-      ).fetchItems(url);
+      ).fetchItems(url));
     }
     return _fetchIgItems(url);
   }
@@ -162,7 +171,7 @@ class DownloaderService {
     return _directMediaExtensions.any(path.endsWith);
   }
 
-  Future<List<MediaItem>> _fetchIgItems(String igUrl) async {
+  Future<FetchResult> _fetchIgItems(String igUrl) async {
     // Normalise: strip query string, ensure trailing slash
     final cleanUrl = igUrl.split('?').first.replaceAll(RegExp(r'/+$'), '') + '/';
     debugPrint('[IG] URL: $cleanUrl');
@@ -189,7 +198,7 @@ class DownloaderService {
         final items = await _fetchViaMediaId(storyMediaId, sessionId);
         if (items.isNotEmpty) {
           debugPrint('[IG] SERVED BY Story API (0b): ${items.length} items');
-          return items;
+          return FetchResult(items: items);
         }
       } catch (e) {
         debugPrint('[IG] Story API failed: $e');
@@ -206,6 +215,13 @@ class DownloaderService {
     // lossy main-page scrape as the last resort.
     debugPrint(
         '[IG] Strategy order: A (embed, no cookie) → 0 (private API) → B (main page)');
+
+    // WHY Strategy 0 could not serve, when it couldn't — carried into the
+    // FetchResult if the lossy Strategy B ends up serving, so the UI can warn
+    // that the result may silently be incomplete (field case: B returned 1
+    // item for a genuine 4-slide carousel). Null while 0 is still viable.
+    DegradedReason? strategy0Unavailable =
+        sessionId == null ? DegradedReason.notLoggedIn : null;
 
     // ── Strategy A: embed captioned page — FIRST ─────────────────────────
     // /embed/captioned/ is a public iframe endpoint — no cookie sent (cookie
@@ -224,7 +240,7 @@ class DownloaderService {
             final items = _parseEmbedPage(resp.data!, cleanUrl);
             if (items.isNotEmpty) {
               debugPrint('[IG] SERVED BY Strategy A (embed): ${items.length} items');
-              return items;
+              return FetchResult(items: items);
             }
           }
         } catch (e) {
@@ -246,15 +262,50 @@ class DownloaderService {
       final shortcode = _extractShortcode(cleanUrl);
       if (shortcode != null) {
         debugPrint('[IG] Embed could not serve — escalating to private API');
+        // Probe-then-proceed: when Strategy 0 is blocked by a challenge/auth
+        // cooldown, run ONE inline recovery probe first — if access has in
+        // fact recovered, THIS request gets the full-quality Strategy 0
+        // result instead of the degraded Strategy B fallback. Deliberately a
+        // probe and not a trial media call: a failed real call would re-enter
+        // the pushback branch and bump the escalation ladder (2h→4h→8h),
+        // whereas maybeReprobe fails closed, is ladder-neutral, and enforces
+        // its own 5-minute floor internally (so this is a cheap timestamp
+        // check when called again sooner).
+        if (RateGuard.instance.status.isChallenge) {
+          debugPrint('[IG] Strategy 0 blocked '
+              '(${RateGuard.instance.status.challengeReason?.code ?? 'unknown'})'
+              ' — attempting inline recovery probe before falling back');
+          final recovered = await RateGuard.instance.maybeReprobe();
+          if (recovered) {
+            debugPrint(
+                '[IG] Inline probe cleared the block — proceeding with Strategy 0');
+          }
+        }
         try {
           final items = await _fetchViaPrivateApi(shortcode, sessionId);
           if (items.isNotEmpty) {
             debugPrint('[IG] SERVED BY Strategy 0 (private API): ${items.length} items');
-            return items;
+            return FetchResult(items: items);
           }
+          strategy0Unavailable = DegradedReason.strategy0Failed;
         } catch (e) {
           debugPrint('[IG] Private API failed: $e');
+          // Classify WHY for the degraded-result warning: a RateGuard refusal
+          // (thrown before the call) or a cooldown that is active NOW (tripped
+          // by this very call) is a block; the auth flavour points at re-login.
+          final rg = RateGuard.instance.status;
+          if (e is RateLimitException || rg.isChallenge) {
+            strategy0Unavailable = rg.needsRelogin
+                ? DegradedReason.authInvalid
+                : DegradedReason.blockedByCooldown;
+          } else {
+            strategy0Unavailable = DegradedReason.strategy0Failed;
+          }
         }
+      } else {
+        // Logged in but no shortcode could be extracted — Strategy 0 can't
+        // even identify the post, so a B result is just as unverifiable.
+        strategy0Unavailable = DegradedReason.strategy0Failed;
       }
     }
 
@@ -273,8 +324,12 @@ class DownloaderService {
         throw Exception('Failed to load Instagram page (${resp.statusCode})');
       }
       final items = _parseMainPage(resp.data!, cleanUrl);
-      debugPrint('[IG] SERVED BY Strategy B (main page): ${items.length} items');
-      return items;
+      debugPrint('[IG] SERVED BY Strategy B (main page): ${items.length} items'
+          '${strategy0Unavailable != null ? ' — DEGRADED (${strategy0Unavailable.name}): may be incomplete' : ''}');
+      // B serving while Strategy 0 was unavailable is a DEGRADED result: OG
+      // tags routinely expose only the first slide of a carousel, and there is
+      // no error to tell the user — so the reason is surfaced as a warning.
+      return FetchResult(items: items, degradedReason: strategy0Unavailable);
     } catch (e) {
       final msg = e.toString().toLowerCase();
       if (msg.contains('redirect')) {
@@ -430,6 +485,11 @@ class DownloaderService {
         'before retrying.',
       );
     }
+
+    // Clean authenticated 200 — definitional proof any active block's premise
+    // is gone (stronger than the synthetic probe, which hits a different
+    // endpoint). Clears a lingering cooldown/auth state; no-op otherwise.
+    await RateGuard.instance.noteAuthenticatedSuccess();
 
     final data = jsonDecode(resp.data!) as Map<String, dynamic>;
     final item = _dig(data, ['items', 0]) as Map<String, dynamic>?;

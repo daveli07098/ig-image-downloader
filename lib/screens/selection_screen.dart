@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app.dart';
+import '../models/fetch_result.dart';
 import '../models/media_item.dart';
 import '../providers/download_queue_provider.dart';
 import '../services/download_ledger_service.dart';
@@ -16,7 +17,7 @@ import '../services/webview_html_fetcher.dart' as webview_html_fetcher;
 // "Verify to continue" WebView on top of whatever screen the user is on by
 // then — possibly a DIFFERENT post's SelectionScreen.
 final _mediaItemsProvider =
-    FutureProvider.autoDispose.family<List<MediaItem>, String>((ref, url) {
+    FutureProvider.autoDispose.family<FetchResult, String>((ref, url) {
   // Flipped by ref.onDispose when the last listener (this screen) goes away
   // — captured by the renderedHtmlFallback closure below so an abandoned
   // request can detect it's been cancelled instead of pushing UI.
@@ -114,8 +115,8 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
         title: const Text('Select media'),
         actions: [
           asyncItems.whenOrNull(
-            data: (items) {
-              final filtered = _filterAlreadyDownloaded(items);
+            data: (result) {
+              final filtered = _filterAlreadyDownloaded(result.items);
               if (filtered.isEmpty) return const SizedBox.shrink();
               return TextButton(
                 onPressed: () => _toggleAll(filtered),
@@ -135,7 +136,8 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
           error: err.toString(),
           onRetry: () => ref.invalidate(_mediaItemsProvider(widget.igUrl)),
         ),
-        data: (rawItems) {
+        data: (result) {
+          final rawItems = result.items;
           final items = _filterAlreadyDownloaded(rawItems);
           // Every item was already downloaded — show a clear "nothing new
           // here" state instead of an empty grid, which would look identical
@@ -165,6 +167,15 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
                       ?.copyWith(color: cs.onSurfaceVariant),
                 ),
               ),
+
+              // ── Degraded-result warning ─────────────────────────────────
+              // Shown when the items came from the lossy Strategy B fallback
+              // while the full-quality private API was unavailable — the grid
+              // may then silently be missing carousel slides (field case: 1
+              // item shown for a genuine 4-slide carousel). Non-blocking by
+              // design: the user may be perfectly happy with the first image.
+              if (result.isDegraded)
+                _DegradedResultBanner(reason: result.degradedReason!),
 
               // ── Media grid ─────────────────────────────────────────────
               Expanded(
@@ -213,6 +224,58 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+// ── Degraded-result warning banner ──────────────────────────────────────────
+
+/// Non-blocking warning that the grid below may be an INCOMPLETE view of the
+/// post (typically only the first image of a carousel), because it was served
+/// by the lossy fallback while the full-quality authenticated strategy was
+/// unavailable. The copy varies with WHY it was unavailable so the user gets
+/// the actionable remedy (log in vs retry later).
+class _DegradedResultBanner extends StatelessWidget {
+  const _DegradedResultBanner({required this.reason});
+
+  final DegradedReason reason;
+
+  String get _text => switch (reason) {
+        DegradedReason.notLoggedIn =>
+          'Not logged in to Instagram — this may be only the first image of '
+          'a carousel. Log in from the Accounts tab for the full post.',
+        DegradedReason.blockedByCooldown =>
+          'Instagram requests are paused — this may be only the first image '
+          'of a carousel. Retry later for the full post.',
+        DegradedReason.authInvalid =>
+          'Instagram login unavailable — this may be only the first image of '
+          'a carousel. Log in again for the full post.',
+        DegradedReason.strategy0Failed =>
+          'Full-quality fetch failed — this may be only the first image of '
+          'a carousel. Retry for the full post.',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      color: cs.tertiaryContainer.withValues(alpha: 0.6),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.warning_amber_rounded,
+              size: 18, color: cs.onTertiaryContainer),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _text,
+              style: TextStyle(fontSize: 12, color: cs.onTertiaryContainer),
+            ),
+          ),
+        ],
       ),
     );
   }
