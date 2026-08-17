@@ -4,6 +4,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'app.dart';
 import 'services/dev_logger.dart';
+import 'services/download_ledger_service.dart';
 import 'services/rate_guard_service.dart';
 
 /// True in kDebugMode, OR when built with `--dart-define=DEV_MODE=true`.
@@ -22,6 +23,11 @@ Future<void> main() async {
   // Load the persisted Instagram request budget / cooldown before any download
   // path can run, so a cooldown survives an app restart.
   await RateGuard.instance.init();
+
+  // Load the persisted "already downloaded" ledger before any selection
+  // screen or download path can run, so previously-downloaded items are
+  // hidden from the grid immediately rather than briefly flashing on screen.
+  await DownloadLedgerService.instance.init();
 
   // In dev mode (debug or --dart-define=DEV_MODE=true), intercept debugPrint
   // so every log line appears in the in-app DevLogOverlay as well as logcat.

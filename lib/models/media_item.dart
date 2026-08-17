@@ -33,15 +33,22 @@ class MediaItem {
   /// user to be shown the wrong file.
   String get filenameBase {
     final dateStr = _formatDate(postTimestamp);
-    // Stable polynomial hash of the URL path — same URL always produces same
-    // hash across app restarts, different URLs produce different hashes.
+    final hash = hashMediaUrl(mediaUrl);
+    return '${username}_${dateStr}_${itemIndex}_$hash';
+  }
+
+  /// Stable polynomial hash of a media URL's path (query params stripped) —
+  /// same URL always produces the same hash across app restarts, different
+  /// URLs produce different hashes. Shared by [filenameBase] (date-scoped,
+  /// used for the on-disk filename) and [DownloadLedgerService] (date-free,
+  /// used as a permanent dedup key) so the two never drift apart.
+  static String hashMediaUrl(String mediaUrl) {
     final path = mediaUrl.split('?').first;
     var h = 0;
     for (final c in path.codeUnits) {
       h = ((h * 31) + c) & 0xFFFFFF;
     }
-    final hash = h.toRadixString(16).padLeft(6, '0');
-    return '${username}_${dateStr}_${itemIndex}_$hash';
+    return h.toRadixString(16).padLeft(6, '0');
   }
 
   Map<String, dynamic> toJson() => {

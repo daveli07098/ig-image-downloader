@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../app.dart';
 import '../models/media_item.dart';
 import '../providers/download_queue_provider.dart';
+import '../services/download_ledger_service.dart';
 import '../services/downloader_service.dart';
 import '../services/webview_html_fetcher.dart' as webview_html_fetcher;
 
@@ -97,6 +98,12 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
     Navigator.of(context).pop(); // go back to HomeScreen queue
   }
 
+  /// Drops items already recorded in [DownloadLedgerService] — the user's
+  /// explicit choice ("skip silently") over showing a "saved" badge, so
+  /// already-downloaded media never reaches the grid or gets re-selected.
+  List<MediaItem> _filterAlreadyDownloaded(List<MediaItem> items) =>
+      items.where((i) => !DownloadLedgerService.instance.contains(i)).toList();
+
   @override
   Widget build(BuildContext context) {
     final asyncItems = ref.watch(_mediaItemsProvider(widget.igUrl));
@@ -107,14 +114,18 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
         title: const Text('Select media'),
         actions: [
           asyncItems.whenOrNull(
-            data: (items) => TextButton(
-              onPressed: () => _toggleAll(items),
-              child: Text(
-                _selectedIds.length == items.length
-                    ? 'Deselect all'
-                    : 'Select all',
-              ),
-            ),
+            data: (items) {
+              final filtered = _filterAlreadyDownloaded(items);
+              if (filtered.isEmpty) return const SizedBox.shrink();
+              return TextButton(
+                onPressed: () => _toggleAll(filtered),
+                child: Text(
+                  _selectedIds.length == filtered.length
+                      ? 'Deselect all'
+                      : 'Select all',
+                ),
+              );
+            },
           ) ?? const SizedBox.shrink(),
         ],
       ),
@@ -124,7 +135,17 @@ class _SelectionScreenState extends ConsumerState<SelectionScreen> {
           error: err.toString(),
           onRetry: () => ref.invalidate(_mediaItemsProvider(widget.igUrl)),
         ),
-        data: (items) {
+        data: (rawItems) {
+          final items = _filterAlreadyDownloaded(rawItems);
+          // Every item was already downloaded — show a clear "nothing new
+          // here" state instead of an empty grid, which would look identical
+          // to a failed scrape.
+          if (items.isEmpty && rawItems.isNotEmpty) {
+            return _AllDownloadedView(
+              total: rawItems.length,
+              onRetry: () => ref.invalidate(_mediaItemsProvider(widget.igUrl)),
+            );
+          }
           _initSelection(items);
           return Column(
             children: [
@@ -334,6 +355,61 @@ class _LoadingView extends StatelessWidget {
           SizedBox(height: 16),
           Text('Fetching media from Instagram…'),
         ],
+      ),
+    );
+  }
+}
+
+/// Shown when every item the scrape returned is already in the download
+/// ledger. Deliberately distinct from an empty grid (which would look
+/// identical to a failed scrape) — this makes explicit that the fetch
+/// succeeded and there's simply nothing new to download.
+class _AllDownloadedView extends StatelessWidget {
+  const _AllDownloadedView({required this.total, required this.onRetry});
+  final int total;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24.0),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.check_circle_outline_rounded, size: 56, color: cs.primary),
+            const SizedBox(height: 16),
+            Text(
+              'All $total item${total == 1 ? '' : 's'} already downloaded',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Nothing new to select from this post.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: cs.onSurfaceVariant, fontSize: 13),
+            ),
+            const SizedBox(height: 24),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: () => Navigator.of(context).pop(),
+                  icon: const Icon(Icons.arrow_back_rounded),
+                  label: const Text('Back'),
+                ),
+                const SizedBox(width: 12),
+                FilledButton.icon(
+                  onPressed: onRetry,
+                  icon: const Icon(Icons.refresh_rounded),
+                  label: const Text('Re-check'),
+                ),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

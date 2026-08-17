@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:html/parser.dart' as html_parser;
 import '../models/media_item.dart';
+import 'download_ledger_service.dart';
 import 'facebook_downloader_service.dart';
 import 'generic_article_downloader_service.dart';
 import 'ig_url_parser.dart';
@@ -675,6 +676,10 @@ class DownloaderService {
     final existing = File(savePath);
     if (existing.existsSync() && existing.lengthSync() > 0) {
       debugPrint('[IG] Already exists (${existing.lengthSync()} B), skipping: $savePath');
+      // Backfill: a file from before the ledger existed (or one the ledger
+      // otherwise missed) still needs an entry so the selection screen hides
+      // it from now on instead of just this one download bypassing it.
+      await DownloadLedgerService.instance.record(item);
       return (path: savePath, skipped: true);
     }
     // Remove a stale 0-byte final file or a leftover .part from a prior attempt.
@@ -731,6 +736,11 @@ class DownloaderService {
         debugPrint('[IG] MediaScanner failed (non-fatal): $e');
       }
     }
+
+    // Record the successful download so the selection screen hides this item
+    // from the grid on any future fetch of the same post — the whole point
+    // of the ledger (see its doc comment for why the key is date-independent).
+    await DownloadLedgerService.instance.record(item);
 
     return (path: savePath, skipped: false);
   }
