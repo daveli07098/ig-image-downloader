@@ -21,10 +21,17 @@ import 'x_downloader_service.dart';
 /// media browser without being duplicated into Pictures.
 ///
 /// Extraction strategy (in order):
+///   A. Embed page → window.__additionalDataLoaded JSON — cookie-less, so it
+///      spends zero authenticated-surface risk; structurally identical
+///      extraction to the private API (same _extractFromSlides helpers).
+///      Thin/truncated carousel payloads are rejected so 0 can serve them.
 ///   0. Instagram private API — i.instagram.com (requires session cookie)
-///      Full carousel, original resolution, full video
-///   1. Embed page → window.__additionalDataLoaded JSON (public posts, limited)
-///   2. Main page OG tags + display_url JSON fallback (single posts)
+///      Full carousel, original resolution, full video. The ONLY strategy
+///      that can serve private-account posts — but also the exact surface
+///      Meta polices for automation, so it runs only when A can't deliver.
+///   B. Main page OG tags + display_url JSON fallback (lossy last resort:
+///      no taken_at, username often 'unknown')
+/// Stories are a separate URL-gated branch (0b) and always need the API.
 class DownloaderService {
   static const _crawlerUA =
       'facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)';
@@ -163,29 +170,14 @@ class DownloaderService {
     // Attach session cookie if the user has logged in
     final sessionId = await SessionService.getSessionId(LoginPlatform.instagram);
     debugPrint('[IG] sessionId: ${sessionId != null ? 'SET (${sessionId.length} chars)' : 'NULL — not logged in'}');
-    final cookieHeader =
-        sessionId != null ? 'sessionid=$sessionId' : null;
-
-    // ── Strategy 0: Instagram private API (requires login) ───────────────
-    // Returns full carousel + original resolution for any public/private post
-    if (sessionId != null) {
-      final shortcode = _extractShortcode(cleanUrl);
-      if (shortcode != null) {
-        try {
-          final items = await _fetchViaPrivateApi(shortcode, sessionId);
-          if (items.isNotEmpty) {
-            debugPrint('[IG] Private API succeeded: ${items.length} items');
-            return items;
-          }
-        } catch (e) {
-          debugPrint('[IG] Private API failed: $e');
-        }
-      }
-    }
 
     // ── Strategy 0b: Story via private API ──────────────────────────────
     // Story URLs already contain the numeric media ID, so no shortcode
     // conversion is needed. Stories are always behind a session wall.
+    // This branch is URL-pattern-gated (never matches /p/, /reel/, /tv/) and
+    // stays ahead of the A → 0 → B chain: story URLs have no embed page, so
+    // running Strategy A on them would only waste a doomed request before the
+    // "Stories require login" message.
     final storyMediaId = _extractStoryMediaId(cleanUrl);
     if (storyMediaId != null) {
       if (sessionId == null) {
@@ -196,7 +188,7 @@ class DownloaderService {
       try {
         final items = await _fetchViaMediaId(storyMediaId, sessionId);
         if (items.isNotEmpty) {
-          debugPrint('[IG] Story API succeeded: ${items.length} items');
+          debugPrint('[IG] SERVED BY Story API (0b): ${items.length} items');
           return items;
         }
       } catch (e) {
@@ -208,10 +200,20 @@ class DownloaderService {
       );
     }
 
-    // ── Strategy A: embed captioned page ─────────────────────────────────
+    // Regular posts (/p/, /reel/, /tv/) run the chain A → 0 → B: the
+    // cookie-less embed first (zero account risk, identical extraction), the
+    // authenticated private API only when the embed can't deliver, and the
+    // lossy main-page scrape as the last resort.
+    debugPrint(
+        '[IG] Strategy order: A (embed, no cookie) → 0 (private API) → B (main page)');
+
+    // ── Strategy A: embed captioned page — FIRST ─────────────────────────
     // /embed/captioned/ is a public iframe endpoint — no cookie sent (cookie
-    // triggers auth redirect loop). Try desktop Chrome UA first (most likely
-    // to get __additionalDataLoaded JSON), then facebookexternalhit as fallback.
+    // triggers auth redirect loop), so this spends none of the authenticated
+    // account-risk budget. Try desktop Chrome UA first (most likely to get
+    // __additionalDataLoaded JSON), then facebookexternalhit as fallback.
+    // _parseEmbedPage returns [] for thin/truncated carousel payloads, which
+    // falls through to Strategy 0 below.
     try {
       final embedUrl = '${cleanUrl}embed/captioned/';
       debugPrint('[IG] Trying embed: $embedUrl');
@@ -221,7 +223,7 @@ class DownloaderService {
           if (resp.statusCode == 200 && resp.data != null) {
             final items = _parseEmbedPage(resp.data!, cleanUrl);
             if (items.isNotEmpty) {
-              debugPrint('[IG] Embed succeeded: ${items.length} items');
+              debugPrint('[IG] SERVED BY Strategy A (embed): ${items.length} items');
               return items;
             }
           }
@@ -233,18 +235,46 @@ class DownloaderService {
       debugPrint('[IG] Embed failed: $e');
     }
 
-    // ── Strategy B: main page (crawler UA, no cookie) ─────────────────────
+    // ── Strategy 0: Instagram private API — SECOND (requires login) ──────
+    // Returns full carousel + original resolution for any public/private post.
+    // Must run whenever Strategy A returned empty, thin, or threw: private-
+    // account posts can ONLY be served here. Runs after A because it sends the
+    // session cookie to i.instagram.com — the exact surface Meta polices for
+    // automation. A RateGuard block (RateLimitException) is swallowed like any
+    // other failure so the chain still falls through to Strategy B.
+    if (sessionId != null) {
+      final shortcode = _extractShortcode(cleanUrl);
+      if (shortcode != null) {
+        debugPrint('[IG] Embed could not serve — escalating to private API');
+        try {
+          final items = await _fetchViaPrivateApi(shortcode, sessionId);
+          if (items.isNotEmpty) {
+            debugPrint('[IG] SERVED BY Strategy 0 (private API): ${items.length} items');
+            return items;
+          }
+        } catch (e) {
+          debugPrint('[IG] Private API failed: $e');
+        }
+      }
+    }
+
+    // ── Strategy B: main page (crawler UA, no cookie) — LAST ──────────────
     // facebookexternalhit UA reliably gets OG meta tags for public posts.
     // We do NOT send the session cookie here — bot UA + sessionid is an
     // instant automation-detection signal that causes IG to redirect to login.
     // Private posts are handled exclusively by Strategy 0 (private API).
-    debugPrint('[IG] Falling back to main page');
+    // Last in the chain because it is lossy: OG tags carry no taken_at (so
+    // filenames get stamped with TODAY's date) and the username often
+    // degrades to 'unknown' for bare /p/<code>/ links.
+    debugPrint('[IG] Falling back to main page (Strategy B — lossy last resort)');
     try {
       final resp = await _dio.get<String>(cleanUrl);
       if (resp.statusCode != 200 || resp.data == null) {
         throw Exception('Failed to load Instagram page (${resp.statusCode})');
       }
-      return _parseMainPage(resp.data!, cleanUrl);
+      final items = _parseMainPage(resp.data!, cleanUrl);
+      debugPrint('[IG] SERVED BY Strategy B (main page): ${items.length} items');
+      return items;
     } catch (e) {
       final msg = e.toString().toLowerCase();
       if (msg.contains('redirect')) {
@@ -346,6 +376,10 @@ class DownloaderService {
     // Throws RateLimitException when the hourly budget is spent or a challenge
     // cooldown is active; counts this call against the budget once allowed.
     RateGuard.instance.assertCanCall();
+    // Pace the call: back-to-back authenticated bursts are a strong automation
+    // signal, so successive private-API calls are spaced out with jitter. This
+    // DELAYS (never fails) the call — see RateGuard.awaitCallSlot.
+    await RateGuard.instance.awaitCallSlot();
     await RateGuard.instance.recordApiCall();
 
     final Response<String> resp;
@@ -483,15 +517,47 @@ class DownloaderService {
     final postTimestamp = (item['taken_at'] as num?)?.toInt();
     debugPrint('[IG] username: $username, taken_at: $postTimestamp');
 
+    // Instagram's own slide count for carousels. Present in the API-shaped
+    // embed payload even when carousel_media itself is truncated; 0/absent
+    // for genuine single-media posts.
+    final declaredCount = (item['carousel_media_count'] as num?)?.toInt() ?? 0;
+
     // Carousel post: carousel_media array
     final carouselList = item['carousel_media'];
     if (carouselList is List && carouselList.isNotEmpty) {
-      debugPrint('[IG] carousel_media: ${carouselList.length} slides');
-      return _extractFromSlides(
+      debugPrint('[IG] carousel_media: ${carouselList.length} slides'
+          '${declaredCount > 0 ? ' (declared: $declaredCount)' : ''}');
+      final items = _extractFromSlides(
         carouselList.cast<Map<String, dynamic>>(),
         username,
         postTimestamp: postTimestamp,
       );
+      // Thin-payload guard: the embed JSON is a "limited" payload and can
+      // truncate carousels. Reject ONLY on positive evidence of
+      // incompleteness — the payload itself declaring more slides than we
+      // extracted (carousel_media_count > extracted), or slides present in
+      // carousel_media that extraction couldn't turn into items (missing
+      // urls). A legitimate single-image post has no carousel_media and
+      // declaredCount 0, so it can never trip this guard. Returning [] makes
+      // the caller fall through to Strategy 0 (private API), which serves
+      // the full post.
+      final expected =
+          declaredCount > carouselList.length ? declaredCount : carouselList.length;
+      if (items.length < expected) {
+        debugPrint('[IG] Embed carousel incomplete: got ${items.length} of '
+            '$expected slides — rejecting so the private API can serve the full post');
+        return [];
+      }
+      return items;
+    }
+
+    // The payload claims this is a carousel (count > 1) but shipped no
+    // carousel_media at all — a maximally-thin embed response. Same guard,
+    // same fall-through to Strategy 0.
+    if (declaredCount > 1) {
+      debugPrint('[IG] Embed declares a $declaredCount-slide carousel but has '
+          'no carousel_media — rejecting so the private API can serve the full post');
+      return [];
     }
 
     // Single post

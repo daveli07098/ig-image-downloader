@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -153,9 +154,31 @@ class RateGuard {
   /// Rolling window the budget is measured over.
   static const Duration window = Duration(hours: 1);
 
-  /// Cooldown imposed when Instagram returns a challenge/checkpoint/429.
+  /// Base cooldown imposed when Instagram returns a challenge/checkpoint/429.
   /// Long and deliberate: hammering through a soft flag is what escalates it.
+  /// Repeat trips escalate exponentially — see [triggerChallengeCooldown].
   static const Duration challengeCooldown = Duration(hours: 2);
+
+  /// Ceiling for an escalated challenge cooldown (2h → 4h → 8h → 16h → 24h).
+  static const Duration maxChallengeCooldown = Duration(hours: 24);
+
+  /// A cooldown trip within this window of the PREVIOUS trip escalates the
+  /// backoff level; a trip after a clean period this long resets the level to
+  /// 0 (base 2 h again). "Clean" = no trips, regardless of app restarts —
+  /// both the level and the last-trip instant are persisted.
+  static const Duration escalationResetAfter = Duration(hours: 24);
+
+  /// Minimum spacing between successive authenticated private-API media calls.
+  /// Back-to-back bursts are a strong automation signal even well inside the
+  /// hourly budget; combined with [callSpacingJitterMaxMs] the effective gap
+  /// is ~3–5 s. Enforced in-memory only ([awaitCallSlot]) — a cold app start
+  /// is inherently spaced already, so persisting this would add nothing.
+  static const Duration minCallSpacing = Duration(seconds: 3);
+
+  /// Upper bound (exclusive of +1) of the random jitter added on top of
+  /// [minCallSpacing], so consecutive calls never fire at a fixed cadence —
+  /// perfectly regular intervals are themselves an automation tell.
+  static const int callSpacingJitterMaxMs = 2000;
 
   /// Minimum spacing between recovery-probe attempts, enforced independently
   /// of the hourly call budget and persisted so it survives a restart. This
@@ -183,6 +206,13 @@ class RateGuard {
   static const _reasonKey = 'rate_challenge_reason';
   static const _httpStatusKey = 'rate_challenge_http_status';
   static const _trippedAtKey = 'rate_challenge_at';
+  // Backoff escalation state. Unlike the cooldown diagnostics above (which
+  // live and die with the active cooldown), these must SURVIVE the cooldown
+  // clearing — escalation is decided by comparing the next trip against the
+  // previous one, which by definition happens after the previous cooldown
+  // is gone.
+  static const _escalationLevelKey = 'rate_escalation_level';
+  static const _lastTripKey = 'rate_last_trip_ts';
 
   /// Epoch-ms timestamps of recent authenticated calls (trimmed to [window]).
   final List<int> _callTs = [];
@@ -202,6 +232,25 @@ class RateGuard {
 
   /// Epoch-ms of the last recovery-probe attempt, or null if none yet.
   int? _lastProbeMs;
+
+  /// Consecutive-trip escalation level: 0 = first trip (base [challengeCooldown]),
+  /// each repeat trip within [escalationResetAfter] doubles the cooldown up to
+  /// [maxChallengeCooldown]. Persisted so escalation survives restarts.
+  int _escalationLevel = 0;
+
+  /// Epoch-ms of the most recent cooldown trip EVER. Distinct from
+  /// [_challengeAtMs] (`rate_challenge_at`), which is cleared with the active
+  /// cooldown — this one persists across clears so the NEXT trip can tell
+  /// whether it came "soon after" the previous one and must escalate.
+  int? _lastTripMs;
+
+  /// Epoch-ms before which the next authenticated media call may not fire —
+  /// the in-memory reservation cursor for [awaitCallSlot]. Not persisted:
+  /// spacing is an anti-burst measure within a running session.
+  int _nextCallSlotMs = 0;
+
+  /// Jitter source for [awaitCallSlot].
+  final Random _spacingRng = Random();
 
   /// One-shot flag set when a cooldown was lifted by a successful reprobe
   /// (Instagram recovered before the fixed timer ran out) rather than by the
@@ -242,6 +291,8 @@ class RateGuard {
     _challengeHttpStatus = prefs.getInt(_httpStatusKey);
     _challengeAtMs = prefs.getInt(_trippedAtKey);
     _lastProbeMs = prefs.getInt(_lastProbeKey);
+    _escalationLevel = prefs.getInt(_escalationLevelKey) ?? 0;
+    _lastTripMs = prefs.getInt(_lastTripKey);
     _loaded = true;
     _recompute();
   }
@@ -276,22 +327,75 @@ class RateGuard {
     await _persist();
   }
 
+  /// Delays — never fails — until this call's reserved pacing slot, so
+  /// successive authenticated media calls cannot fire back-to-back. Each call
+  /// waits at least [minCallSpacing] (plus 0–[callSpacingJitterMaxMs] ms of
+  /// random jitter) after the previous one; the first call after an idle gap
+  /// proceeds immediately.
+  ///
+  /// The slot is reserved SYNCHRONOUSLY (before any await) so concurrent
+  /// callers queue behind one another instead of all measuring from the same
+  /// "now" and bursting together after a single shared wait. Implementation is
+  /// a plain timer — no locks, so it cannot deadlock, and being async it never
+  /// blocks the UI thread.
+  Future<void> awaitCallSlot() async {
+    final nowMs = DateTime.now().millisecondsSinceEpoch;
+    final jitterMs = _spacingRng.nextInt(callSpacingJitterMaxMs + 1);
+    final slotMs = _nextCallSlotMs > nowMs ? _nextCallSlotMs : nowMs;
+    _nextCallSlotMs = slotMs + minCallSpacing.inMilliseconds + jitterMs;
+    final waitMs = slotMs - nowMs;
+    if (waitMs > 0) {
+      debugPrint('[RateGuard] Pacing: waiting ${waitMs}ms before private-API call');
+      await Future<void>.delayed(Duration(milliseconds: waitMs));
+    }
+  }
+
   /// Trips the hard cooldown after Instagram returns a challenge/checkpoint/429.
   /// [reason] and [statusCode] record WHICH signal matched and what Instagram
   /// returned, so the block can be diagnosed later — including after an app
   /// restart (both are persisted with the cooldown).
+  ///
+  /// Repeat trips escalate exponentially: a trip within [escalationResetAfter]
+  /// of the previous one doubles the cooldown (2h → 4h → 8h → 16h, capped at
+  /// [maxChallengeCooldown]) — coming back at the same fixed 2 h after every
+  /// flag is exactly the persistence pattern that turns a soft flag into a
+  /// real block. A trip after a clean [escalationResetAfter] resets to the
+  /// base 2 h.
   Future<void> triggerChallengeCooldown(
       {PushbackReason? reason, int? statusCode}) async {
     final now = DateTime.now();
-    _challengeUntilMs = now.add(challengeCooldown).millisecondsSinceEpoch;
+    final nowMs = now.millisecondsSinceEpoch;
+    if (_lastTripMs != null &&
+        nowMs - _lastTripMs! < escalationResetAfter.inMilliseconds) {
+      _escalationLevel++; // repeat trip soon after the last — escalate
+    } else {
+      _escalationLevel = 0; // long clean period (or first ever) — start fresh
+    }
+    final cooldown = _cooldownForLevel(_escalationLevel);
+    _lastTripMs = nowMs;
+    _challengeUntilMs = now.add(cooldown).millisecondsSinceEpoch;
     _challengeReason = reason;
     _challengeHttpStatus = statusCode;
-    _challengeAtMs = now.millisecondsSinceEpoch;
+    _challengeAtMs = nowMs;
     debugPrint('[RateGuard] Cooldown STARTED: '
         'reason=${reason?.code ?? 'unknown'} http=${statusCode ?? '-'} '
-        'until=${now.add(challengeCooldown)}');
+        'level=$_escalationLevel duration=${cooldown.inHours}h '
+        'until=${now.add(cooldown)}');
     _recompute();
     await _persist();
+  }
+
+  /// Escalated cooldown duration: [challengeCooldown] × 2^level, capped at
+  /// [maxChallengeCooldown] (2h, 4h, 8h, 16h, 24h, 24h, …).
+  static Duration _cooldownForLevel(int level) {
+    var ms = challengeCooldown.inMilliseconds;
+    for (var i = 0; i < level; i++) {
+      ms *= 2;
+      if (ms >= maxChallengeCooldown.inMilliseconds) {
+        return maxChallengeCooldown;
+      }
+    }
+    return Duration(milliseconds: ms);
   }
 
   /// Re-evaluates the window (used by the banner's 1 s ticker so the budget
@@ -471,6 +575,13 @@ class RateGuard {
     }
     if (_lastProbeMs != null) {
       await prefs.setInt(_lastProbeKey, _lastProbeMs!);
+    }
+    // Backoff escalation state — outlives any individual cooldown by design
+    // (see the key comments). A stale level is harmless: the reset-vs-escalate
+    // decision at the next trip compares against _lastTripMs anyway.
+    await prefs.setInt(_escalationLevelKey, _escalationLevel);
+    if (_lastTripMs != null) {
+      await prefs.setInt(_lastTripKey, _lastTripMs!);
     }
     // Cooldown diagnostics live and die with the cooldown itself.
     if (_challengeReason != null) {
