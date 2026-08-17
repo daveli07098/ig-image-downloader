@@ -40,7 +40,7 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
 
   /// How many finished (done/error) jobs to retain as history. The most
   /// recent N are always kept regardless of age; older ones are auto-pruned.
-  static const _maxFinishedHistory = 10;
+  static const _maxFinishedHistory = 30;
 
   final Ref _ref;
   final _random = Random();

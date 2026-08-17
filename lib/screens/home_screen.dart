@@ -447,7 +447,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.4',
+                    'v1.1.0.5',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
