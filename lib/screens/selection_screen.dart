@@ -1,14 +1,50 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../app.dart';
 import '../models/media_item.dart';
 import '../providers/download_queue_provider.dart';
 import '../services/downloader_service.dart';
+import '../services/webview_html_fetcher.dart' as webview_html_fetcher;
 
-// Provider: async-fetch all items for a given IG URL
+// Provider: async-fetch all items for a given IG URL.
+//
+// autoDispose so that popping SelectionScreen mid-fetch tears this down
+// instead of leaving an abandoned request running: without it, an in-flight
+// fetch that later hits a JS anti-bot challenge would push a full-screen
+// "Verify to continue" WebView on top of whatever screen the user is on by
+// then — possibly a DIFFERENT post's SelectionScreen.
 final _mediaItemsProvider =
-    FutureProvider.family<List<MediaItem>, String>((ref, url) {
-  return DownloaderService().fetchItems(url);
+    FutureProvider.autoDispose.family<List<MediaItem>, String>((ref, url) {
+  // Flipped by ref.onDispose when the last listener (this screen) goes away
+  // — captured by the renderedHtmlFallback closure below so an abandoned
+  // request can detect it's been cancelled instead of pushing UI.
+  var cancelled = false;
+  ref.onDispose(() => cancelled = true);
+
+  return DownloaderService().fetchItems(
+    url,
+    // Context-bound WebView fallback for pages blocked by a JS anti-bot
+    // challenge (see generic_article_downloader_service.dart). Uses the
+    // app-wide navigator key rather than a widget's BuildContext since this
+    // provider callback runs outside the widget tree.
+    renderedHtmlFallback: (u) {
+      if (cancelled) {
+        throw Exception(
+          'Cancelled — the request was abandoned before verification.',
+        );
+      }
+      // Null only if the app was torn down mid-fetch — surface a readable
+      // error instead of crashing on a force unwrap.
+      final context = rootNavigatorKey.currentContext;
+      if (context == null) {
+        throw Exception(
+          'Cannot run browser verification — the app is no longer on screen.',
+        );
+      }
+      return webview_html_fetcher.fetchRenderedHtml(context, u);
+    },
+  );
 });
 
 /// Shows all media items in an IG post as a preview grid.

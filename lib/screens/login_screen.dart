@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 import '../services/session_service.dart';
+import '../services/webview_user_agent.dart';
 
 /// Per-platform login configuration.
 class _PlatformConfig {
@@ -141,11 +142,7 @@ class _LoginScreenState extends State<LoginScreen> {
       // detects "wv" — creating an 18-deep redirect chain that ends in
       // ERR_TOO_MANY_REDIRECTS.  Use a real Chrome Mobile UA (no "wv") so
       // Instagram treats the WebView as a regular Chrome browser session.
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 14; SM-S9280) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/136.0.0.0 Mobile Safari/537.36',
-      )
+      ..setUserAgent(kRealChromeMobileUA)
       ..setNavigationDelegate(NavigationDelegate(
         // Facebook (and IG/X) try to hand the login off to their native app via
         // a custom scheme (e.g. fb…://login_via_app/?…). A WebView can't load a

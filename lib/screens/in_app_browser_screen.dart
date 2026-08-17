@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import '../services/webview_user_agent.dart';
 
 /// A lightweight in-app browser for previewing a platform's pages *after* login.
 ///
@@ -39,11 +40,7 @@ class _InAppBrowserScreenState extends State<InAppBrowserScreen> {
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       // Match the login WebView's real-Chrome UA (no "wv") so Instagram doesn't
       // treat us as an automated WebView and throw a challenge.
-      ..setUserAgent(
-        'Mozilla/5.0 (Linux; Android 14; SM-S9280) '
-        'AppleWebKit/537.36 (KHTML, like Gecko) '
-        'Chrome/136.0.0.0 Mobile Safari/537.36',
-      )
+      ..setUserAgent(kRealChromeMobileUA)
       ..setNavigationDelegate(NavigationDelegate(
         // Keep the user in the web flow: allow only web schemes, block native
         // app handoffs (e.g. fb…://, intent://) that a WebView can't load.

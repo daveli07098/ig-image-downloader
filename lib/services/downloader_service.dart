@@ -91,7 +91,10 @@ class DownloaderService {
 
   // ── 1.  Fetch all media items from a URL (IG or X) ──────────────────────
 
-  Future<List<MediaItem>> fetchItems(String url) async {
+  Future<List<MediaItem>> fetchItems(
+    String url, {
+    Future<String> Function(String url)? renderedHtmlFallback,
+  }) async {
     if (XDownloaderService.isXUrl(url)) {
       return XDownloaderService().fetchItems(url);
     }
@@ -110,10 +113,45 @@ class DownloaderService {
       return FacebookDownloaderService().fetchItems(url, fbCookies: fbCookies);
     }
     if (!IgUrlParser.isInstagramUrl(url)) {
+      // Direct media link (e.g. a raw CDN .jpg/.mp4 URL shared straight out of
+      // a gallery, like https://64.media.tumblr.com/abc/def.jpg) — download it
+      // as-is rather than HTML-scraping raw media bytes, which the generic
+      // article parser can't handle (it expects a page, not an image/video).
+      if (_looksLikeDirectMediaUrl(url)) {
+        final host = Uri.tryParse(url)?.host ?? 'media';
+        final siteName = host.replaceFirst('www.', '').replaceAll('.', '_');
+        return [
+          MediaItem(
+            id: '0',
+            mediaUrl: url,
+            thumbnailUrl: _urlLooksLikeVideo(url) ? null : url,
+            type: _urlLooksLikeVideo(url)
+                ? MediaItemType.video
+                : MediaItemType.image,
+            username: siteName,
+            itemIndex: 1,
+          ),
+        ];
+      }
       // Not IG, X, Threads, or Facebook — try generic article extraction
-      return GenericArticleDownloaderService().fetchItems(url);
+      return GenericArticleDownloaderService(
+        renderedHtmlFallback: renderedHtmlFallback,
+      ).fetchItems(url);
     }
     return _fetchIgItems(url);
+  }
+
+  /// Extensions that mark a URL as pointing directly at a media file rather
+  /// than an HTML page. Checked against the path only (query string stripped)
+  /// so CDN cache-busting params (`?resize=…`) don't defeat the match.
+  static const _directMediaExtensions = [
+    '.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov',
+  ];
+
+  static bool _looksLikeDirectMediaUrl(String url) {
+    final path = Uri.tryParse(url)?.path.toLowerCase() ??
+        url.toLowerCase().split('?').first;
+    return _directMediaExtensions.any(path.endsWith);
   }
 
   Future<List<MediaItem>> _fetchIgItems(String igUrl) async {

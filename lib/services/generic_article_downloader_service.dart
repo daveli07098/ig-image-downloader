@@ -3,6 +3,18 @@ import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
 import 'package:html/dom.dart' as dom;
 import '../models/media_item.dart';
+import 'js_challenge_detector.dart';
+
+/// Internal signal thrown by [GenericArticleDownloaderService._fetchPlain]
+/// when a 403 response's body was confirmed (via [looksLikeJsChallenge]) to
+/// be the anti-bot challenge page, carrying that body so
+/// [GenericArticleDownloaderService.fetchItems] can hand it to
+/// [GenericArticleDownloaderService.renderedHtmlFallback] instead of parsing
+/// it as real content.
+class _JsChallengeResponse implements Exception {
+  const _JsChallengeResponse(this.html);
+  final String html;
+}
 
 /// General-purpose article / forum image downloader.
 ///
@@ -49,7 +61,14 @@ class GenericArticleDownloaderService {
 
   final Dio _dio;
 
-  GenericArticleDownloaderService({Dio? dio})
+  /// Optional callback that re-fetches a URL's HTML through a real WebView,
+  /// letting a JS-based anti-bot challenge (see [looksLikeJsChallenge]) run
+  /// and clear naturally. Supplied by the UI layer (see selection_screen.dart
+  /// / webview_html_fetcher.dart) — this service stays free of Flutter UI
+  /// imports and unit-testable, since it never touches a BuildContext itself.
+  final Future<String> Function(String url)? renderedHtmlFallback;
+
+  GenericArticleDownloaderService({Dio? dio, this.renderedHtmlFallback})
       : _dio = dio ??
             Dio(BaseOptions(
               connectTimeout: const Duration(seconds: 15),
@@ -78,16 +97,76 @@ class GenericArticleDownloaderService {
 
   /// Fetches [url], checks structure, and returns all article images.
   /// Throws a descriptive [Exception] if the page has no usable images.
+  ///
+  /// Fast path: a plain Dio GET (no JS). If that comes back blocked — a 403
+  /// confirmed as an anti-bot challenge, or a 200 whose body is itself a JS
+  /// anti-bot challenge page — and [renderedHtmlFallback] was supplied,
+  /// re-fetch through it (a real WebView that lets the challenge's own JS run
+  /// and clear) and parse that HTML instead. A genuine 403 (paywall,
+  /// geo-block, IP ban) is NOT a challenge and propagates as a clear
+  /// "Failed to load page (403)" error instead of being parsed as content.
   Future<List<MediaItem>> fetchItems(String url) async {
     final cleanUrl = url.split('#').first;
     debugPrint('[Article] URL: $cleanUrl');
 
-    final resp = await _dio.get<String>(cleanUrl);
-    if (resp.statusCode != 200 || resp.data == null) {
-      throw Exception('Failed to load page (${resp.statusCode})');
+    String html;
+    try {
+      html = await _fetchPlain(cleanUrl);
+    } on _JsChallengeResponse {
+      // 403 whose body was confirmed (via looksLikeJsChallenge) to be the
+      // anti-bot challenge page itself, not a genuine access failure.
+      html = await _resolveChallenge(cleanUrl);
+      return _parsePage(html, cleanUrl);
     }
 
-    return _parsePage(resp.data!, cleanUrl);
+    if (looksLikeJsChallenge(html, wasForbidden: false)) {
+      html = await _resolveChallenge(cleanUrl);
+    }
+
+    return _parsePage(html, cleanUrl);
+  }
+
+  /// Runs [renderedHtmlFallback] for a page identified as a JS anti-bot
+  /// challenge, or throws a descriptive error if no fallback was supplied.
+  Future<String> _resolveChallenge(String cleanUrl) async {
+    if (renderedHtmlFallback == null) {
+      throw Exception(
+        'This page is protected by an anti-bot / JS challenge that this '
+        'app could not clear automatically.',
+      );
+    }
+    debugPrint('[Article] Blocked by anti-bot challenge — trying WebView fallback');
+    return renderedHtmlFallback!(cleanUrl);
+  }
+
+  /// Plain (no-JS) fetch. Returns the body on a normal 200. On a 403 —
+  /// Automattic's hashcash challenge (and similar gates) return 403 with the
+  /// challenge page as the body — the body is checked via
+  /// [looksLikeJsChallenge] (with `wasForbidden: true`, so its WEAK signals
+  /// are trusted) before being treated as a challenge; if that check fails,
+  /// or the body isn't a String at all (e.g. a JSON error payload), this is a
+  /// genuine 403 rather than an anti-bot block, and throws the original,
+  /// accurate "Failed to load page (403)" error so the caller doesn't
+  /// silently parse it as content. Any other HTTP failure rethrows.
+  Future<String> _fetchPlain(String url) async {
+    try {
+      final resp = await _dio.get<String>(url);
+      if (resp.statusCode != 200 || resp.data == null) {
+        throw Exception('Failed to load page (${resp.statusCode})');
+      }
+      return resp.data!;
+    } on DioException catch (e) {
+      if (e.response?.statusCode == 403) {
+        final data = e.response?.data;
+        if (data is String && looksLikeJsChallenge(data, wasForbidden: true)) {
+          debugPrint('[Article] 403 — confirmed anti-bot challenge');
+          throw _JsChallengeResponse(data);
+        }
+        debugPrint('[Article] 403 — not a JS challenge, treating as a failed load');
+        throw Exception('Failed to load page (403)');
+      }
+      rethrow;
+    }
   }
 
   List<MediaItem> _parsePage(String html, String pageUrl) {

@@ -2,12 +2,19 @@ import 'package:flutter/material.dart';
 import 'screens/home_screen.dart';
 import 'widgets/dev_log_overlay.dart';
 
+/// App-wide navigator key. Lets non-widget code (e.g. the media-items
+/// provider in selection_screen.dart) obtain a `BuildContext` to push a
+/// screen — such as webview_html_fetcher.dart's verification screen — without
+/// threading a context through Riverpod's provider layer.
+final rootNavigatorKey = GlobalKey<NavigatorState>();
+
 class IgDownloaderApp extends StatelessWidget {
   const IgDownloaderApp({super.key});
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      navigatorKey: rootNavigatorKey,
       title: 'IG Downloader',
       debugShowCheckedModeBanner: false,
       theme: ThemeData(
