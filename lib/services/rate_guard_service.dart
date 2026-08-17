@@ -162,10 +162,15 @@ class RateGuard {
   /// Ceiling for an escalated challenge cooldown (2h → 4h → 8h → 16h → 24h).
   static const Duration maxChallengeCooldown = Duration(hours: 24);
 
-  /// A cooldown trip within this window of the PREVIOUS trip escalates the
-  /// backoff level; a trip after a clean period this long resets the level to
-  /// 0 (base 2 h again). "Clean" = no trips, regardless of app restarts —
-  /// both the level and the last-trip instant are persisted.
+  /// Clean-time window that resets the backoff level to 0 (base 2 h again).
+  /// "Clean" is measured from the instant the previous cooldown LIFTED — not
+  /// from when it was tripped — so the mandatory cooldown itself can never
+  /// consume the window. (Measuring from the trip made the ladder self-defeat
+  /// at its own cap: a 24 h cooldown guaranteed the next possible trip was
+  /// ≥ 24 h after the last one, so level 4 always reset instead of pinning.)
+  /// A trip before this much genuinely-unblocked time has passed escalates
+  /// instead. Survives app restarts — the level and the cooldown-end instant
+  /// are persisted.
   static const Duration escalationResetAfter = Duration(hours: 24);
 
   /// Minimum spacing between successive authenticated private-API media calls.
@@ -213,6 +218,7 @@ class RateGuard {
   // is gone.
   static const _escalationLevelKey = 'rate_escalation_level';
   static const _lastTripKey = 'rate_last_trip_ts';
+  static const _cooldownEndedKey = 'rate_cooldown_ended_ts';
 
   /// Epoch-ms timestamps of recent authenticated calls (trimmed to [window]).
   final List<int> _callTs = [];
@@ -240,9 +246,18 @@ class RateGuard {
 
   /// Epoch-ms of the most recent cooldown trip EVER. Distinct from
   /// [_challengeAtMs] (`rate_challenge_at`), which is cleared with the active
-  /// cooldown — this one persists across clears so the NEXT trip can tell
-  /// whether it came "soon after" the previous one and must escalate.
+  /// cooldown — this one persists across clears. Used only to distinguish a
+  /// first-ever trip (level 0) from a repeat; the escalate-vs-reset decision
+  /// itself compares against [_cooldownEndedMs].
   int? _lastTripMs;
+
+  /// Epoch-ms at which the most recent cooldown ENDED (timer expiry uses the
+  /// scheduled end, an early/explicit clear uses the clear instant). Persists
+  /// across clears: the NEXT trip measures its clean period from here, so
+  /// only genuinely-unblocked time counts toward [escalationResetAfter] —
+  /// never the mandatory cooldown itself. Null before the first cooldown has
+  /// ever ended (including legacy persisted state predating this field).
+  int? _cooldownEndedMs;
 
   /// Epoch-ms before which the next authenticated media call may not fire —
   /// the in-memory reservation cursor for [awaitCallSlot]. Not persisted:
@@ -293,6 +308,7 @@ class RateGuard {
     _lastProbeMs = prefs.getInt(_lastProbeKey);
     _escalationLevel = prefs.getInt(_escalationLevelKey) ?? 0;
     _lastTripMs = prefs.getInt(_lastTripKey);
+    _cooldownEndedMs = prefs.getInt(_cooldownEndedKey);
     _loaded = true;
     _recompute();
   }
@@ -355,21 +371,33 @@ class RateGuard {
   /// returned, so the block can be diagnosed later — including after an app
   /// restart (both are persisted with the cooldown).
   ///
-  /// Repeat trips escalate exponentially: a trip within [escalationResetAfter]
-  /// of the previous one doubles the cooldown (2h → 4h → 8h → 16h, capped at
-  /// [maxChallengeCooldown]) — coming back at the same fixed 2 h after every
-  /// flag is exactly the persistence pattern that turns a soft flag into a
-  /// real block. A trip after a clean [escalationResetAfter] resets to the
-  /// base 2 h.
+  /// Repeat trips escalate exponentially, doubling the cooldown (2h → 4h →
+  /// 8h → 16h, capped at [maxChallengeCooldown]) — coming back at the same
+  /// fixed 2 h after every flag is exactly the persistence pattern that turns
+  /// a soft flag into a real block. The level resets to the base 2 h only
+  /// after [escalationResetAfter] of GENUINELY UNBLOCKED time, measured from
+  /// when the previous cooldown lifted ([_cooldownEndedMs]) — never from the
+  /// trip itself, so a long cooldown cannot count as its own clean period.
   Future<void> triggerChallengeCooldown(
       {PushbackReason? reason, int? statusCode}) async {
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
-    if (_lastTripMs != null &&
-        nowMs - _lastTripMs! < escalationResetAfter.inMilliseconds) {
-      _escalationLevel++; // repeat trip soon after the last — escalate
+    if (_lastTripMs == null) {
+      _escalationLevel = 0; // first trip ever — base cooldown
     } else {
-      _escalationLevel = 0; // long clean period (or first ever) — start fresh
+      // Clean time runs from the previous cooldown's END. Because trips are
+      // gated by assertCanCall(), a new trip can only happen after that end,
+      // so this is always ≥ 0 — and, unlike measuring from the trip, it is
+      // independent of the cooldown's own length: even the 24 h cap cannot
+      // satisfy the reset window by itself. Legacy state persisted before
+      // _cooldownEndedMs existed falls back to the old trip-time comparison
+      // for this one decision, then self-heals.
+      final cleanSinceMs = _cooldownEndedMs ?? _lastTripMs!;
+      if (nowMs - cleanSinceMs >= escalationResetAfter.inMilliseconds) {
+        _escalationLevel = 0; // a real clean day since the block lifted — reset
+      } else {
+        _escalationLevel++; // re-flagged too soon after recovering — escalate
+      }
     }
     final cooldown = _cooldownForLevel(_escalationLevel);
     _lastTripMs = nowMs;
@@ -414,6 +442,9 @@ class RateGuard {
         '(${early ? 'early — recovery probe succeeded' : 'explicit clear'}): '
         'was reason=${_challengeReason?.code ?? 'unknown'} '
         'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
+    // The clean period toward an escalation reset starts NOW — the cooldown
+    // was lifted early, so unblocked time genuinely begins at this instant.
+    _cooldownEndedMs = DateTime.now().millisecondsSinceEpoch;
     _challengeUntilMs = null;
     _clearChallengeMeta();
     if (early) _earlyRecoveryPending = true;
@@ -522,6 +553,10 @@ class RateGuard {
       debugPrint('[RateGuard] Cooldown CLEARED (timer expiry — no early '
           'recovery): was reason=${_challengeReason?.code ?? 'unknown'} '
           'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
+      // Clean period starts at the SCHEDULED end, not at whenever _recompute
+      // happened to notice — the account was unblocked from that instant even
+      // if the app sat closed past it, and that idle time is genuinely clean.
+      _cooldownEndedMs = _challengeUntilMs;
       _challengeUntilMs = null;
       _clearChallengeMeta();
       // Fire-and-forget: _recompute must stay synchronous (it runs on a 1 s
@@ -578,10 +613,13 @@ class RateGuard {
     }
     // Backoff escalation state — outlives any individual cooldown by design
     // (see the key comments). A stale level is harmless: the reset-vs-escalate
-    // decision at the next trip compares against _lastTripMs anyway.
+    // decision at the next trip compares against _cooldownEndedMs anyway.
     await prefs.setInt(_escalationLevelKey, _escalationLevel);
     if (_lastTripMs != null) {
       await prefs.setInt(_lastTripKey, _lastTripMs!);
+    }
+    if (_cooldownEndedMs != null) {
+      await prefs.setInt(_cooldownEndedKey, _cooldownEndedMs!);
     }
     // Cooldown diagnostics live and die with the cooldown itself.
     if (_challengeReason != null) {

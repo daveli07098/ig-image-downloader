@@ -533,20 +533,28 @@ class DownloaderService {
         postTimestamp: postTimestamp,
       );
       // Thin-payload guard: the embed JSON is a "limited" payload and can
-      // truncate carousels. Reject ONLY on positive evidence of
-      // incompleteness — the payload itself declaring more slides than we
-      // extracted (carousel_media_count > extracted), or slides present in
-      // carousel_media that extraction couldn't turn into items (missing
-      // urls). A legitimate single-image post has no carousel_media and
+      // truncate carousels. Reject ONLY on positive evidence of TRUNCATION:
+      // the payload declaring more slides (carousel_media_count) than it
+      // actually delivered (carouselList.length). Deliberately NOT compared
+      // against how many items we EXTRACTED — a slide that ships in
+      // carousel_media but yields no MediaItem (e.g. an ad / paid-partnership
+      // slide with no image_versions2/video_versions) is a local extraction
+      // miss, not a thin payload; escalating to the private API can't recover
+      // it and would spend account-attributed calls on every fetch of that
+      // post. A legitimate single-image post has no carousel_media and
       // declaredCount 0, so it can never trip this guard. Returning [] makes
       // the caller fall through to Strategy 0 (private API), which serves
       // the full post.
-      final expected =
-          declaredCount > carouselList.length ? declaredCount : carouselList.length;
-      if (items.length < expected) {
-        debugPrint('[IG] Embed carousel incomplete: got ${items.length} of '
-            '$expected slides — rejecting so the private API can serve the full post');
+      if (declaredCount > carouselList.length) {
+        debugPrint('[IG] Embed carousel truncated: payload delivered '
+            '${carouselList.length} of $declaredCount declared slides — '
+            'rejecting so the private API can serve the full post');
         return [];
+      }
+      if (items.length < carouselList.length) {
+        // Complete payload, partial extraction — keep what we got (see above).
+        debugPrint('[IG] Extracted ${items.length} of ${carouselList.length} '
+            'delivered slides (non-media slide?) — keeping embed result');
       }
       return items;
     }
