@@ -447,7 +447,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.5',
+                    'v1.1.0.6',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -1006,9 +1006,16 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
         // public posts can still download via the HTML-scrape fallback, so
         // "limited" is more accurate than "paused" (which implied nothing
         // would download at all).
+        //
+        // Surface WHY Instagram pushed back (recorded — and persisted — by
+        // RateGuard when the block tripped) so the block is diagnosable from
+        // the banner alone; null for blocks that predate reason tracking.
+        final cause = status.challengeReason != null
+            ? ' Cause: ${status.challengeReason!.label}.'
+            : '';
         text =
-            'Instagram flagged automated activity. Logged-in requests are '
-            'limited — open the Instagram app, clear any prompt, then '
+            'Instagram flagged automated activity.$cause Logged-in requests '
+            'are limited — open the Instagram app, clear any prompt, then '
             'wait$left. Public posts may still download.';
       } else {
         icon = Icons.timer_rounded;

@@ -259,8 +259,45 @@ class DownloaderService {
   }
 
   // ── Strategy 0: Instagram private API ──────────────────────────────────
-  // Pushback detection (`RateGuard.isPushback`) lives in rate_guard_service.dart
-  // so it's shared with RateGuard's own recovery probe instead of duplicated.
+  // Pushback detection (`RateGuard.pushbackReason`) lives in
+  // rate_guard_service.dart so it's shared with RateGuard's own recovery
+  // probe instead of duplicated.
+
+  /// Scrubs session/auth material from [text] before it can reach any log —
+  /// the dev log overlay is user-visible and logs may be shared.
+  ///
+  /// Two independent passes, so no single miss can leak:
+  /// 1. The literal [sessionId] value (and its lowercased form, since pushback
+  ///    bodies are lowercased before matching) is replaced verbatim — even an
+  ///    unexpected echo of the session in the body cannot survive.
+  /// 2. Cookie/auth-style `key=value` pairs (sessionid, csrftoken, cookie,
+  ///    authorization, token, ds_user_id) have their values blanked.
+  static String _redactForLog(String text, String sessionId) {
+    var out = text;
+    if (sessionId.isNotEmpty) {
+      out = out
+          .replaceAll(sessionId, '<redacted>')
+          .replaceAll(sessionId.toLowerCase(), '<redacted>');
+    }
+    out = out.replaceAllMapped(
+      RegExp(
+          r'(sessionid|csrftoken|authorization|cookie|ds_user_id|token)'
+          r'(["\s]*[:=]["\s]*)[^;,&"\s]+',
+          caseSensitive: false),
+      (m) => '${m[1]}${m[2]}<redacted>',
+    );
+    return out;
+  }
+
+  /// Redacts (see [_redactForLog]) THEN truncates [body] to ~300 chars for a
+  /// log snippet. Order matters: truncating first could slice a secret in half
+  /// and leave a fragment the pattern pass no longer recognises.
+  static String _safeBodySnippet(String body, String sessionId) {
+    final redacted = _redactForLog(body, sessionId);
+    return redacted.length <= 300
+        ? redacted
+        : '${redacted.substring(0, 300)}…[truncated]';
+  }
 
   /// Extracts the shortcode from an Instagram URL.
   /// Handles /p/, /reel/, /tv/ paths.
@@ -320,8 +357,17 @@ class DownloaderService {
     } on DioException catch (e) {
       final code = e.response?.statusCode;
       final body = e.response?.data?.toString().toLowerCase() ?? '';
-      if (RateGuard.isPushback(code, body)) {
-        await RateGuard.instance.triggerChallengeCooldown();
+      final pushback = RateGuard.pushbackReason(code, body);
+      if (pushback != null) {
+        // Log the diagnostic BEFORE throwing so the cause is captured even if
+        // the exception is swallowed upstream. Only the URL (media ID, no
+        // secrets) and a redacted+truncated body snippet are logged — never
+        // headers, cookies, or the session value in any form.
+        debugPrint('[RateGuard] BLOCK tripped: reason=${pushback.code} '
+            'http=${code ?? '-'} url=$url '
+            'body="${_safeBodySnippet(body, sessionId)}"');
+        await RateGuard.instance
+            .triggerChallengeCooldown(reason: pushback, statusCode: code);
         throw Exception(
           'Instagram flagged automated activity (HTTP $code). Requests are '
           'paused to protect your account — open the Instagram app, clear any '
@@ -335,8 +381,15 @@ class DownloaderService {
 
     // A 200 can still carry a soft challenge/login wall in its JSON body.
     final lowerBody = resp.data!.toLowerCase();
-    if (RateGuard.isPushback(resp.statusCode, lowerBody)) {
-      await RateGuard.instance.triggerChallengeCooldown();
+    final softPushback = RateGuard.pushbackReason(resp.statusCode, lowerBody);
+    if (softPushback != null) {
+      // Same diagnostic as the DioException branch — see the redaction notes
+      // there. This is the HTTP-200-with-failure-body variant.
+      debugPrint('[RateGuard] BLOCK tripped: reason=${softPushback.code} '
+          'http=${resp.statusCode ?? '-'} url=$url '
+          'body="${_safeBodySnippet(lowerBody, sessionId)}"');
+      await RateGuard.instance.triggerChallengeCooldown(
+          reason: softPushback, statusCode: resp.statusCode);
       throw Exception(
         'Instagram flagged automated activity. Requests are paused to protect '
         'your account — open the Instagram app, clear any prompt, then wait '

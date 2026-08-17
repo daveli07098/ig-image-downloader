@@ -275,6 +275,7 @@ class _DevLogOverlayState extends State<DevLogOverlay> {
         msg.contains('[IG]') ||
         msg.contains('[Login') ||
         msg.contains('[Download') ||
+        msg.contains('[RateGuard]') ||
         msg.contains('[X]')) {
       return const Color(0xFF6BFF9E); // green — service logs
     }

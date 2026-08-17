@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -16,6 +17,45 @@ enum RateLevel {
   blocked,
 }
 
+/// Which specific Instagram pushback signal tripped a challenge cooldown.
+/// Recorded (and persisted) alongside the cooldown so a block that outlives
+/// the session can still be diagnosed after the fact.
+enum PushbackReason {
+  /// HTTP 429 Too Many Requests.
+  http429('http429', 'Rate limited (HTTP 429)'),
+
+  /// Body contained `checkpoint_required` — account-level security wall.
+  checkpointRequired(
+      'checkpoint_required', 'Security check requested (checkpoint_required)'),
+
+  /// Body contained `challenge_required` — challenge/verification wall.
+  challengeRequired(
+      'challenge_required', 'Security check requested (challenge_required)'),
+
+  /// Body contained `login_required` — session rejected / login wall.
+  loginRequired('login_required', 'Login required (login_required)'),
+
+  /// Body contained `please wait a few minutes` — soft temporary throttle.
+  pleaseWait('please_wait', 'Temporary throttle ("please wait a few minutes")');
+
+  const PushbackReason(this.code, this.label);
+
+  /// Stable machine-readable code (used for persistence and logs).
+  final String code;
+
+  /// Short human-readable cause for banners and diagnostics.
+  final String label;
+
+  /// Inverse of [code] for restoring a persisted reason; null if unknown.
+  static PushbackReason? fromCode(String? code) {
+    if (code == null) return null;
+    for (final r in PushbackReason.values) {
+      if (r.code == code) return r;
+    }
+    return null;
+  }
+}
+
 /// Immutable snapshot of the rate situation, surfaced to the UI.
 @immutable
 class RateGuardStatus {
@@ -25,6 +65,7 @@ class RateGuardStatus {
     required this.warnAt,
     required this.blockedUntil,
     required this.isChallenge,
+    this.challengeReason,
   });
 
   /// Authenticated private-API calls made in the trailing 60 minutes.
@@ -45,6 +86,10 @@ class RateGuardStatus {
   /// as opposed to merely exhausting our self-imposed hourly budget.
   final bool isChallenge;
 
+  /// The specific signal that tripped the challenge cooldown, or null when
+  /// not in a challenge cooldown (or the reason predates this field).
+  final PushbackReason? challengeReason;
+
   int get remaining => (limit - usedLastHour).clamp(0, limit);
 
   RateLevel get level {
@@ -62,11 +107,12 @@ class RateGuardStatus {
       other.limit == limit &&
       other.warnAt == warnAt &&
       other.blockedUntil == blockedUntil &&
-      other.isChallenge == isChallenge;
+      other.isChallenge == isChallenge &&
+      other.challengeReason == challengeReason;
 
   @override
-  int get hashCode =>
-      Object.hash(usedLastHour, limit, warnAt, blockedUntil, isChallenge);
+  int get hashCode => Object.hash(
+      usedLastHour, limit, warnAt, blockedUntil, isChallenge, challengeReason);
 }
 
 /// Thrown when an authenticated Instagram call is refused locally because the
@@ -132,12 +178,27 @@ class RateGuard {
   static const _callsKey = 'rate_api_call_ts';
   static const _cooldownKey = 'rate_challenge_until';
   static const _lastProbeKey = 'rate_last_probe_ts';
+  // Diagnostics for the active cooldown — persisted so a block that outlives
+  // the session (the common case, cooldowns run for hours) stays explainable.
+  static const _reasonKey = 'rate_challenge_reason';
+  static const _httpStatusKey = 'rate_challenge_http_status';
+  static const _trippedAtKey = 'rate_challenge_at';
 
   /// Epoch-ms timestamps of recent authenticated calls (trimmed to [window]).
   final List<int> _callTs = [];
 
   /// Epoch-ms until which an Instagram-imposed cooldown is active, or null.
   int? _challengeUntilMs;
+
+  /// Why the active cooldown was tripped (null when no cooldown, or when the
+  /// persisted state predates reason tracking).
+  PushbackReason? _challengeReason;
+
+  /// HTTP status of the response that tripped the active cooldown, or null.
+  int? _challengeHttpStatus;
+
+  /// Epoch-ms at which the active cooldown was tripped, or null.
+  int? _challengeAtMs;
 
   /// Epoch-ms of the last recovery-probe attempt, or null if none yet.
   int? _lastProbeMs;
@@ -177,6 +238,9 @@ class RateGuard {
     }
     final until = prefs.getInt(_cooldownKey);
     if (until != null) _challengeUntilMs = until;
+    _challengeReason = PushbackReason.fromCode(prefs.getString(_reasonKey));
+    _challengeHttpStatus = prefs.getInt(_httpStatusKey);
+    _challengeAtMs = prefs.getInt(_trippedAtKey);
     _lastProbeMs = prefs.getInt(_lastProbeKey);
     _loaded = true;
     _recompute();
@@ -213,9 +277,19 @@ class RateGuard {
   }
 
   /// Trips the hard cooldown after Instagram returns a challenge/checkpoint/429.
-  Future<void> triggerChallengeCooldown() async {
-    _challengeUntilMs =
-        DateTime.now().add(challengeCooldown).millisecondsSinceEpoch;
+  /// [reason] and [statusCode] record WHICH signal matched and what Instagram
+  /// returned, so the block can be diagnosed later — including after an app
+  /// restart (both are persisted with the cooldown).
+  Future<void> triggerChallengeCooldown(
+      {PushbackReason? reason, int? statusCode}) async {
+    final now = DateTime.now();
+    _challengeUntilMs = now.add(challengeCooldown).millisecondsSinceEpoch;
+    _challengeReason = reason;
+    _challengeHttpStatus = statusCode;
+    _challengeAtMs = now.millisecondsSinceEpoch;
+    debugPrint('[RateGuard] Cooldown STARTED: '
+        'reason=${reason?.code ?? 'unknown'} http=${statusCode ?? '-'} '
+        'until=${now.add(challengeCooldown)}');
     _recompute();
     await _persist();
   }
@@ -230,7 +304,14 @@ class RateGuard {
   /// the UI uses to show a reminder.
   Future<void> clearChallengeCooldown({bool early = false}) async {
     if (_challengeUntilMs == null) return; // nothing to clear
+    // Distinguish evidence-based early recovery (probe succeeded) from an
+    // explicit clear, so field logs show whether auto-recovery actually works.
+    debugPrint('[RateGuard] Cooldown CLEARED '
+        '(${early ? 'early — recovery probe succeeded' : 'explicit clear'}): '
+        'was reason=${_challengeReason?.code ?? 'unknown'} '
+        'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
     _challengeUntilMs = null;
+    _clearChallengeMeta();
     if (early) _earlyRecoveryPending = true;
     _recompute();
     await _persist();
@@ -332,7 +413,16 @@ class RateGuard {
 
     // Clear an expired challenge cooldown.
     if (_challengeUntilMs != null && _challengeUntilMs! <= now.millisecondsSinceEpoch) {
+      // Timer ran out with no early recovery — log it so field data can show
+      // how often the recovery probe beats the fixed timer (or never fires).
+      debugPrint('[RateGuard] Cooldown CLEARED (timer expiry — no early '
+          'recovery): was reason=${_challengeReason?.code ?? 'unknown'} '
+          'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
       _challengeUntilMs = null;
+      _clearChallengeMeta();
+      // Fire-and-forget: _recompute must stay synchronous (it runs on a 1 s
+      // UI ticker); the removed keys just need to land eventually.
+      unawaited(_persist());
     }
 
     final used = _callTs.length;
@@ -354,9 +444,22 @@ class RateGuard {
       warnAt: warnAt,
       blockedUntil: blockedUntil,
       isChallenge: isChallenge,
+      challengeReason: isChallenge ? _challengeReason : null,
     );
     if (next != listenable.value) listenable.value = next;
   }
+
+  /// Drops the diagnostic metadata tied to a (now cleared) cooldown.
+  void _clearChallengeMeta() {
+    _challengeReason = null;
+    _challengeHttpStatus = null;
+    _challengeAtMs = null;
+  }
+
+  /// The active cooldown's trip time as a log-friendly string.
+  String _trippedAtString() => _challengeAtMs == null
+      ? 'unknown'
+      : DateTime.fromMillisecondsSinceEpoch(_challengeAtMs!).toString();
 
   Future<void> _persist() async {
     final prefs = await SharedPreferences.getInstance();
@@ -369,6 +472,22 @@ class RateGuard {
     if (_lastProbeMs != null) {
       await prefs.setInt(_lastProbeKey, _lastProbeMs!);
     }
+    // Cooldown diagnostics live and die with the cooldown itself.
+    if (_challengeReason != null) {
+      await prefs.setString(_reasonKey, _challengeReason!.code);
+    } else {
+      await prefs.remove(_reasonKey);
+    }
+    if (_challengeHttpStatus != null) {
+      await prefs.setInt(_httpStatusKey, _challengeHttpStatus!);
+    } else {
+      await prefs.remove(_httpStatusKey);
+    }
+    if (_challengeAtMs != null) {
+      await prefs.setInt(_trippedAtKey, _challengeAtMs!);
+    } else {
+      await prefs.remove(_trippedAtKey);
+    }
   }
 
   /// True when an `i.instagram.com` response indicates Instagram is pushing
@@ -380,12 +499,28 @@ class RateGuard {
   /// Shared by [DownloaderService] (which trips [triggerChallengeCooldown] on
   /// a real request) and [maybeReprobe] (which relies on it to tell a clean
   /// recovery from a still-blocked probe) so the two never drift apart.
-  static bool isPushback(int? statusCode, String lowerBody) {
-    if (statusCode == 429) return true;
-    return lowerBody.contains('checkpoint_required') ||
-        lowerBody.contains('challenge_required') ||
-        lowerBody.contains('login_required') ||
-        lowerBody.contains('please wait a few minutes');
+  static bool isPushback(int? statusCode, String lowerBody) =>
+      pushbackReason(statusCode, lowerBody) != null;
+
+  /// Like [isPushback], but returns WHICH signal matched (or null when the
+  /// response is clean) so callers can record and surface the actual cause.
+  /// Checked in escalation order: the explicit 429 wins over body markers,
+  /// and the harder account walls win over the soft "please wait" throttle.
+  static PushbackReason? pushbackReason(int? statusCode, String lowerBody) {
+    if (statusCode == 429) return PushbackReason.http429;
+    if (lowerBody.contains('checkpoint_required')) {
+      return PushbackReason.checkpointRequired;
+    }
+    if (lowerBody.contains('challenge_required')) {
+      return PushbackReason.challengeRequired;
+    }
+    if (lowerBody.contains('login_required')) {
+      return PushbackReason.loginRequired;
+    }
+    if (lowerBody.contains('please wait a few minutes')) {
+      return PushbackReason.pleaseWait;
+    }
+    return null;
   }
 
   /// Human-readable "in 5 min" / "in 1 h 12 min" from now until [until].
