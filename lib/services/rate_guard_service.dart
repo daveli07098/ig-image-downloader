@@ -47,6 +47,18 @@ enum PushbackReason {
   /// Short human-readable cause for banners and diagnostics.
   final String label;
 
+  /// True when this signal is an AUTHENTICATION failure — the stored session
+  /// itself was rejected — rather than automation/throttling pushback.
+  /// `login_required` is the only pure auth wall: waiting changes nothing
+  /// (the session is still invalid at the end of any cooldown; field-verified
+  /// — a 2 h login_required cooldown even survived a re-login) and the remedy
+  /// is re-login. `checkpoint_required`/`challenge_required` stay on the
+  /// automation ladder: they flag the ACCOUNT (clearing them needs user action
+  /// inside Instagram, not just a fresh session) and retrying through them is
+  /// exactly what escalates a soft flag into a real block. `http429` and
+  /// `please_wait` are unambiguous throttling.
+  bool get isAuthFailure => this == PushbackReason.loginRequired;
+
   /// Inverse of [code] for restoring a persisted reason; null if unknown.
   static PushbackReason? fromCode(String? code) {
     if (code == null) return null;
@@ -90,6 +102,11 @@ class RateGuardStatus {
   /// The specific signal that tripped the challenge cooldown, or null when
   /// not in a challenge cooldown (or the reason predates this field).
   final PushbackReason? challengeReason;
+
+  /// True when the active block is an AUTH wall ([PushbackReason.isAuthFailure])
+  /// — the session expired and the actionable remedy is re-login, not waiting.
+  /// The banner uses this to swap "wait it out" copy for a "Log in" action.
+  bool get needsRelogin => isChallenge && (challengeReason?.isAuthFailure ?? false);
 
   int get remaining => (limit - usedLastHour).clamp(0, limit);
 
@@ -161,6 +178,15 @@ class RateGuard {
 
   /// Ceiling for an escalated challenge cooldown (2h → 4h → 8h → 16h → 24h).
   static const Duration maxChallengeCooldown = Duration(hours: 24);
+
+  /// Short pause for AUTH failures ([PushbackReason.isAuthFailure], i.e.
+  /// `login_required`): the SESSION is invalid, not the automation budget, so
+  /// the escalating ladder above is the wrong tool — waiting hours changes
+  /// nothing because the session is still dead at the end. This is only long
+  /// enough to stop a broken session from being retried in a tight loop; the
+  /// real remedy is re-login, which clears it instantly ([onSessionRefreshed]),
+  /// as does a successful recovery probe.
+  static const Duration authCooldown = Duration(minutes: 10);
 
   /// Clean-time window that resets the backoff level to 0 (base 2 h again).
   /// "Clean" is measured from the instant the previous cooldown LIFTED — not
@@ -323,6 +349,15 @@ class RateGuard {
     final s = listenable.value;
     if (!s.isBlocked) return;
     if (s.isChallenge) {
+      if (s.needsRelogin) {
+        // Auth wall: waiting is NOT the remedy — the session stays invalid
+        // however long the pause runs. Point the user at re-login instead.
+        throw RateLimitException(
+          'Your Instagram session expired — Instagram rejected the saved '
+          'login. Waiting won\'t fix this: open Accounts and log in to '
+          'Instagram again to restore full downloads.',
+        );
+      }
       throw RateLimitException(
         'Instagram flagged automated activity and we paused requests to keep '
         'your account safe. Open the Instagram app, clear any prompt, then wait '
@@ -378,36 +413,50 @@ class RateGuard {
   /// after [escalationResetAfter] of GENUINELY UNBLOCKED time, measured from
   /// when the previous cooldown lifted ([_cooldownEndedMs]) — never from the
   /// trip itself, so a long cooldown cannot count as its own clean period.
+  ///
+  /// AUTH failures ([PushbackReason.isAuthFailure]) bypass the ladder
+  /// entirely: they get the short [authCooldown] and never touch the
+  /// escalation state, because they say nothing about automation pressure —
+  /// only that the session died and the user must log in again.
   Future<void> triggerChallengeCooldown(
       {PushbackReason? reason, int? statusCode}) async {
     final now = DateTime.now();
     final nowMs = now.millisecondsSinceEpoch;
-    if (_lastTripMs == null) {
-      _escalationLevel = 0; // first trip ever — base cooldown
+    final isAuth = reason?.isAuthFailure ?? false;
+    final Duration cooldown;
+    if (isAuth) {
+      // Session rejected — an authentication problem, not automation
+      // pushback. Short anti-hammer pause only; the ladder's level and
+      // clean-time clock stay untouched.
+      cooldown = authCooldown;
     } else {
-      // Clean time runs from the previous cooldown's END. Because trips are
-      // gated by assertCanCall(), a new trip can only happen after that end,
-      // so this is always ≥ 0 — and, unlike measuring from the trip, it is
-      // independent of the cooldown's own length: even the 24 h cap cannot
-      // satisfy the reset window by itself. Legacy state persisted before
-      // _cooldownEndedMs existed falls back to the old trip-time comparison
-      // for this one decision, then self-heals.
-      final cleanSinceMs = _cooldownEndedMs ?? _lastTripMs!;
-      if (nowMs - cleanSinceMs >= escalationResetAfter.inMilliseconds) {
-        _escalationLevel = 0; // a real clean day since the block lifted — reset
+      if (_lastTripMs == null) {
+        _escalationLevel = 0; // first trip ever — base cooldown
       } else {
-        _escalationLevel++; // re-flagged too soon after recovering — escalate
+        // Clean time runs from the previous cooldown's END. Because trips are
+        // gated by assertCanCall(), a new trip can only happen after that end,
+        // so this is always ≥ 0 — and, unlike measuring from the trip, it is
+        // independent of the cooldown's own length: even the 24 h cap cannot
+        // satisfy the reset window by itself. Legacy state persisted before
+        // _cooldownEndedMs existed falls back to the old trip-time comparison
+        // for this one decision, then self-heals.
+        final cleanSinceMs = _cooldownEndedMs ?? _lastTripMs!;
+        if (nowMs - cleanSinceMs >= escalationResetAfter.inMilliseconds) {
+          _escalationLevel = 0; // a real clean day since the block lifted — reset
+        } else {
+          _escalationLevel++; // re-flagged too soon after recovering — escalate
+        }
       }
+      cooldown = _cooldownForLevel(_escalationLevel);
+      _lastTripMs = nowMs;
     }
-    final cooldown = _cooldownForLevel(_escalationLevel);
-    _lastTripMs = nowMs;
     _challengeUntilMs = now.add(cooldown).millisecondsSinceEpoch;
     _challengeReason = reason;
     _challengeHttpStatus = statusCode;
     _challengeAtMs = nowMs;
     debugPrint('[RateGuard] Cooldown STARTED: '
         'reason=${reason?.code ?? 'unknown'} http=${statusCode ?? '-'} '
-        'level=$_escalationLevel duration=${cooldown.inHours}h '
+        '${isAuth ? 'auth-wall duration=${cooldown.inMinutes}min' : 'level=$_escalationLevel duration=${cooldown.inHours}h'} '
         'until=${now.add(cooldown)}');
     _recompute();
     await _persist();
@@ -444,10 +493,43 @@ class RateGuard {
         'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
     // The clean period toward an escalation reset starts NOW — the cooldown
     // was lifted early, so unblocked time genuinely begins at this instant.
-    _cooldownEndedMs = DateTime.now().millisecondsSinceEpoch;
+    // Auth-wall cooldowns live outside the ladder entirely (they never bumped
+    // its state on trip), so clearing one must not move its clock either.
+    if (!(_challengeReason?.isAuthFailure ?? false)) {
+      _cooldownEndedMs = DateTime.now().millisecondsSinceEpoch;
+    }
     _challengeUntilMs = null;
     _clearChallengeMeta();
     if (early) _earlyRecoveryPending = true;
+    _recompute();
+    await _persist();
+  }
+
+  /// Call after a NEW Instagram session is successfully captured (login flow).
+  /// A fresh session invalidates the premise of any active cooldown — most
+  /// obviously a `login_required` auth wall (field-verified: the old behaviour
+  /// let a 2 h cooldown survive a re-login, refusing the private API on a
+  /// perfectly valid session) — and stales the escalation ladder, whose
+  /// evidence was gathered against the old session. Clears both and resets
+  /// the ladder to first-trip state.
+  Future<void> onSessionRefreshed() async {
+    final hadCooldown = _challengeUntilMs != null;
+    final hadLadderState =
+        _escalationLevel != 0 || _lastTripMs != null || _cooldownEndedMs != null;
+    if (!hadCooldown && !hadLadderState) return; // nothing to reset
+    if (hadCooldown) {
+      debugPrint('[RateGuard] Cooldown CLEARED (new session captured): '
+          'was reason=${_challengeReason?.code ?? 'unknown'} '
+          'http=${_challengeHttpStatus ?? '-'} tripped=${_trippedAtString()}');
+      _challengeUntilMs = null;
+      _clearChallengeMeta();
+    }
+    // Full ladder reset — the next trip (if any) starts back at the base
+    // cooldown, exactly like a first-ever trip. _persist removes the nulled
+    // keys so the reset survives a restart.
+    _escalationLevel = 0;
+    _lastTripMs = null;
+    _cooldownEndedMs = null;
     _recompute();
     await _persist();
   }
@@ -556,7 +638,10 @@ class RateGuard {
       // Clean period starts at the SCHEDULED end, not at whenever _recompute
       // happened to notice — the account was unblocked from that instant even
       // if the app sat closed past it, and that idle time is genuinely clean.
-      _cooldownEndedMs = _challengeUntilMs;
+      // Auth-wall cooldowns are outside the ladder — don't move its clock.
+      if (!(_challengeReason?.isAuthFailure ?? false)) {
+        _cooldownEndedMs = _challengeUntilMs;
+      }
       _challengeUntilMs = null;
       _clearChallengeMeta();
       // Fire-and-forget: _recompute must stay synchronous (it runs on a 1 s
@@ -614,12 +699,18 @@ class RateGuard {
     // Backoff escalation state — outlives any individual cooldown by design
     // (see the key comments). A stale level is harmless: the reset-vs-escalate
     // decision at the next trip compares against _cooldownEndedMs anyway.
+    // The null branches matter for onSessionRefreshed's full ladder reset —
+    // without the removes, a restart would resurrect the pre-reset ladder.
     await prefs.setInt(_escalationLevelKey, _escalationLevel);
     if (_lastTripMs != null) {
       await prefs.setInt(_lastTripKey, _lastTripMs!);
+    } else {
+      await prefs.remove(_lastTripKey);
     }
     if (_cooldownEndedMs != null) {
       await prefs.setInt(_cooldownEndedKey, _cooldownEndedMs!);
+    } else {
+      await prefs.remove(_cooldownEndedKey);
     }
     // Cooldown diagnostics live and die with the cooldown itself.
     if (_challengeReason != null) {

@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:webview_flutter/webview_flutter.dart';
+import '../services/rate_guard_service.dart';
 import '../services/session_service.dart';
 import '../services/webview_user_agent.dart';
 
@@ -233,6 +234,12 @@ class _LoginScreenState extends State<LoginScreen> {
     if (token != null && token.isNotEmpty) {
       _captured = true;
       await SessionService.saveSessionId(widget.platform, token);
+      // A fresh Instagram session invalidates any RateGuard cooldown that was
+      // tripped against the OLD session (most importantly a login_required
+      // auth wall — waiting it out was pointless, re-login is the fix).
+      if (widget.platform == LoginPlatform.instagram) {
+        await RateGuard.instance.onSessionRefreshed();
+      }
       // Fetch username NOW, while the WebView is still alive (before pop).
       try {
         final username = await _fetchUsernameFromPage(token);
@@ -391,6 +398,11 @@ class _LoginScreenState extends State<LoginScreen> {
             if (token.isNotEmpty) {
               _captured = true;
               await SessionService.saveSessionId(widget.platform, token);
+              // Same as _tryCaptureSession: a new session stales any active
+              // RateGuard cooldown tripped against the old one.
+              if (widget.platform == LoginPlatform.instagram) {
+                await RateGuard.instance.onSessionRefreshed();
+              }
               debugPrint('[Login/${_cfg.label}] session captured before redirect loop abort');
             }
             break;

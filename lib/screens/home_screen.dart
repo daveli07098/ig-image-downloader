@@ -346,6 +346,20 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
+  /// Opens the Instagram login screen from the RateGuard banner's "Log in"
+  /// action (shown when a `login_required` auth wall tripped the block).
+  /// A successful capture auto-clears the cooldown inside the login flow
+  /// (RateGuard.onSessionRefreshed) — this only refreshes the home screen's
+  /// login flags afterwards.
+  Future<void> _reloginInstagram() async {
+    final result = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(
+        builder: (_) => const LoginScreen(platform: LoginPlatform.instagram),
+      ),
+    );
+    if (result == true) await _refreshLoginState();
+  }
+
   Future<void> _showAccountsSheet(BuildContext context) async {
     await showModalBottomSheet<void>(
       context: context,
@@ -447,7 +461,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.8',
+                    'v1.1.0.9',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -517,7 +531,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           // ── Instagram request-budget reminder ────────────────────────────
           // Amber as you near the hourly limit, red (with live countdown) when
           // throttled or flagged. Hidden entirely while there's ample budget.
-          const _RateGuardBanner(),
+          _RateGuardBanner(onRelogin: _reloginInstagram),
 
           // ── Logged-in accounts status bar ────────────────────────────────
           if (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
@@ -894,7 +908,12 @@ class _PlatformRow extends StatelessWidget {
 /// Instagram. Renders nothing while there's ample budget. Drives a 1 s ticker
 /// so the budget recovers and any cooldown counts down on screen in real time.
 class _RateGuardBanner extends StatefulWidget {
-  const _RateGuardBanner();
+  const _RateGuardBanner({required this.onRelogin});
+
+  /// Opens the Instagram login screen — the actionable remedy when the block
+  /// was tripped by a `login_required` auth wall (expired session). Provided
+  /// by the parent so the login flags on the home screen refresh afterwards.
+  final Future<void> Function() onRelogin;
 
   @override
   State<_RateGuardBanner> createState() => _RateGuardBannerState();
@@ -964,12 +983,56 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
     }
   }
 
+  /// Unconditionally clears the cooldown after an explicit confirmation.
+  /// Unlike "Check now" this bypasses the evidence requirement (no probe),
+  /// so the dialog spells out the trade-off: if Instagram is genuinely still
+  /// blocking, the very next request simply re-trips the block.
+  Future<void> _resetCooldown() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reset the pause?'),
+        content: const Text(
+          'This clears the pause without checking Instagram first. If '
+          'Instagram is genuinely still blocking, the next download will '
+          'simply re-trigger it.\n\n'
+          '"Check now" is the recommended option — it verifies access has '
+          'actually recovered before clearing.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Reset anyway'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    await RateGuard.instance.clearChallengeCooldown();
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Pause reset — downloads re-enabled.')),
+    );
+  }
+
   @override
   void dispose() {
     _ticker?.cancel();
     RateGuard.instance.listenable.removeListener(_onChange);
     super.dispose();
   }
+
+  /// Shared compact styling for the banner's inline action buttons.
+  ButtonStyle _actionStyle(Color fg) => TextButton.styleFrom(
+        foregroundColor: fg,
+        minimumSize: const Size(0, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        visualDensity: VisualDensity.compact,
+      );
 
   String _countdown(DateTime until) {
     final secs = until.difference(DateTime.now()).inSeconds.clamp(0, 1 << 31);
@@ -1000,7 +1063,16 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
       final left = status.blockedUntil != null
           ? ' — retry in ${_countdown(status.blockedUntil!)}'
           : '';
-      if (status.isChallenge) {
+      if (status.needsRelogin) {
+        // Auth wall (login_required): the stored session was rejected —
+        // waiting changes nothing, so the copy points straight at re-login
+        // instead of the "clear any prompt, then wait" advice below.
+        icon = Icons.lock_person_rounded;
+        text =
+            'Instagram session expired — the saved login was rejected, so '
+            'waiting won\'t help. Log in again to restore full downloads. '
+            'Public posts may still download.';
+      } else if (status.isChallenge) {
         icon = Icons.gpp_maybe_rounded;
         // Only the authenticated (logged-in) request path is paused here —
         // public posts can still download via the HTML-scrape fallback, so
@@ -1048,30 +1120,55 @@ class _RateGuardBannerState extends State<_RateGuardBanner> {
                   color: fg, fontSize: 12.5, fontWeight: FontWeight.w500),
             ),
           ),
-          // Manual recovery check — only meaningful during an Instagram
+          // Manual recovery actions — only meaningful during an Instagram
           // challenge cooldown; the plain hourly-budget block always clears
           // on the timer alone, so there's nothing for a probe to check.
+          // Stacked vertically so two actions don't squeeze the message text.
           if (status.isChallenge) ...[
             const SizedBox(width: 8),
-            _checkingNow
-                ? SizedBox(
-                    width: 16,
-                    height: 16,
-                    child: CircularProgressIndicator(
-                        strokeWidth: 2, color: fg),
+            Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                // Primary action depends on the cause: an expired session is
+                // fixed by logging in again (probing with the dead session is
+                // pointless — a successful login auto-clears the pause), every
+                // other cause gets the evidence-based recovery check.
+                if (status.needsRelogin)
+                  TextButton(
+                    onPressed: () => widget.onRelogin(),
+                    style: _actionStyle(fg),
+                    child: const Text('Log in',
+                        style: TextStyle(fontSize: 12.5)),
                   )
-                : TextButton(
-                    onPressed: _checkNow,
-                    style: TextButton.styleFrom(
-                      foregroundColor: fg,
-                      minimumSize: const Size(0, 0),
-                      padding:
-                          const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                      visualDensity: VisualDensity.compact,
+                else if (_checkingNow)
+                  Padding(
+                    padding: const EdgeInsets.all(6),
+                    child: SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(
+                          strokeWidth: 2, color: fg),
                     ),
+                  )
+                else
+                  TextButton(
+                    onPressed: _checkNow,
+                    style: _actionStyle(fg),
                     child: const Text('Check now',
                         style: TextStyle(fontSize: 12.5)),
                   ),
+                // Escape hatch: unconditional clear, guarded by a confirmation
+                // dialog because it bypasses the recovery evidence the actions
+                // above gather first.
+                TextButton(
+                  onPressed: _resetCooldown,
+                  style: _actionStyle(fg),
+                  child:
+                      const Text('Reset', style: TextStyle(fontSize: 12.5)),
+                ),
+              ],
+            ),
           ],
         ],
       ),
