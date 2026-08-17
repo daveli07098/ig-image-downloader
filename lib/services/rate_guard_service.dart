@@ -442,21 +442,9 @@ class RateGuard {
     if (isAuth) {
       // Session rejected — an authentication problem, not automation
       // pushback. Short anti-hammer pause only; the ladder's level and
-      // clean-time clock stay untouched.
+      // clean-time clock stay untouched. (The session fingerprint for this
+      // trip is captured below, AFTER the block state is written.)
       cooldown = authCooldown;
-      // Fingerprint (never the value) the session this auth wall tripped
-      // against, so a later probe success can log whether the wall cleared on
-      // the SAME session (login_required was transient) or only after the
-      // user replaced it. Best-effort: a read failure just loses the log
-      // distinction, never the cooldown itself.
-      try {
-        final sid =
-            await SessionService.getSessionId(LoginPlatform.instagram);
-        _challengeSessionFp =
-            sid == null ? null : sessionFingerprint(sid);
-      } catch (_) {
-        _challengeSessionFp = null;
-      }
     } else {
       if (_lastTripMs == null) {
         _escalationLevel = 0; // first trip ever — base cooldown
@@ -478,6 +466,13 @@ class RateGuard {
       cooldown = _cooldownForLevel(_escalationLevel);
       _lastTripMs = nowMs;
     }
+    // The block state is written SYNCHRONOUSLY — everything from the top of
+    // this method to here contains no await (same pattern as awaitCallSlot's
+    // slot reservation), so once a trip begins no other task in the event
+    // loop can observe "not blocked". An await before these writes would open
+    // a window during which a concurrent caller's assertCanCall() still sees
+    // _challengeUntilMs == null and slips another authenticated request
+    // through to Instagram exactly when the block should already be in force.
     _challengeUntilMs = now.add(cooldown).millisecondsSinceEpoch;
     _challengeReason = reason;
     _challengeHttpStatus = statusCode;
@@ -487,6 +482,27 @@ class RateGuard {
         '${isAuth ? 'auth-wall duration=${cooldown.inMinutes}min' : 'level=$_escalationLevel duration=${cooldown.inHours}h'} '
         'until=${now.add(cooldown)}');
     _recompute();
+    if (isAuth) {
+      // Fingerprint (never the value) the session this auth wall tripped
+      // against, so a later probe success can log whether the wall cleared on
+      // the SAME session (login_required was transient) or only after the
+      // user replaced it. Captured AFTER the block state above so the await
+      // inside getSessionId can never delay the block taking effect.
+      // Best-effort: a read failure just loses the log distinction, never
+      // the cooldown itself.
+      String? fp;
+      try {
+        final sid =
+            await SessionService.getSessionId(LoginPlatform.instagram);
+        fp = sid == null ? null : sessionFingerprint(sid);
+      } catch (_) {
+        fp = null;
+      }
+      // Record it only if the cooldown set above is still active — a
+      // concurrent clear during the await already dropped the metadata, and
+      // resurrecting the fingerprint would persist it with no cooldown.
+      if (_challengeUntilMs != null) _challengeSessionFp = fp;
+    }
     await _persist();
   }
 
@@ -625,14 +641,32 @@ class RateGuard {
       return false; // too soon since the last probe — never hammer Instagram
     }
 
+    // Reserve the probe slot SYNCHRONOUSLY — before any await — mirroring
+    // awaitCallSlot's reservation pattern. Otherwise two concurrent callers
+    // (the home-screen 1 s ticker racing a probe-then-proceed fetch) could
+    // both pass the interval check above before either records the attempt,
+    // firing TWO real probes in one interval. Reserving up front also keeps
+    // a later crash or timeout counted against the min-interval — the
+    // guarantee is "at most one probe per interval attempted", not "per
+    // interval succeeded".
+    final prevProbeMs = _lastProbeMs;
+    _lastProbeMs = now;
+
     final sessionId =
         await SessionService.getSessionId(LoginPlatform.instagram);
-    if (sessionId == null) return false; // can't probe without a session
+    if (sessionId == null) {
+      // No probe was actually attempted — roll the reservation back so a
+      // missing session doesn't lock probing out for a full interval. Only
+      // rolled back while OUR reservation is still the latest one: a
+      // concurrent force-caller may have re-reserved during the await, and
+      // its slot must survive (so the rollback can never reopen the race).
+      if (_lastProbeMs == now) _lastProbeMs = prevProbeMs;
+      return false; // can't probe without a session
+    }
 
-    // Record the attempt (and persist it) BEFORE the network call so a crash
-    // or timeout still counts against the min-interval — the guarantee is
-    // "at most one probe per interval attempted", not "per interval succeeded".
-    _lastProbeMs = now;
+    // Persist the reservation made above BEFORE the network call (the
+    // in-memory write already guards concurrent callers in this isolate;
+    // persisting makes it survive a restart mid-probe).
     await _persist();
 
     try {

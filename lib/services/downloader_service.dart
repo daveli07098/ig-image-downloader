@@ -290,11 +290,16 @@ class DownloaderService {
           strategy0Unavailable = DegradedReason.strategy0Failed;
         } catch (e) {
           debugPrint('[IG] Private API failed: $e');
-          // Classify WHY for the degraded-result warning: a RateGuard refusal
-          // (thrown before the call) or a cooldown that is active NOW (tripped
-          // by this very call) is a block; the auth flavour points at re-login.
-          final rg = RateGuard.instance.status;
-          if (e is RateLimitException || rg.isChallenge) {
+          // Classify WHY for the degraded-result warning. Only a
+          // RateLimitException is a block signal: RateGuard's refusal thrown
+          // before the call, or the pushback throw right after THIS call
+          // tripped the cooldown (both pushback branches in _fetchViaMediaId
+          // throw it). Consulting rg.isChallenge for arbitrary exceptions
+          // would mislabel an unrelated failure (JSON parse, timeout) as a
+          // block whenever a DIFFERENT concurrent fetch happened to trip the
+          // challenge first; the auth flavour still points at re-login.
+          if (e is RateLimitException) {
+            final rg = RateGuard.instance.status;
             strategy0Unavailable = rg.needsRelogin
                 ? DegradedReason.authInvalid
                 : DegradedReason.blockedByCooldown;
@@ -457,7 +462,11 @@ class DownloaderService {
             'body="${_safeBodySnippet(body, sessionId)}"');
         await RateGuard.instance
             .triggerChallengeCooldown(reason: pushback, statusCode: code);
-        throw Exception(
+        // RateLimitException (not a generic Exception) so catch sites can
+        // tell "THIS call hit a block" apart from unrelated failures by type
+        // — see the degraded-reason classification in _fetchIgItems. The
+        // message text (and thus SelectionScreen's classifier) is unchanged.
+        throw RateLimitException(
           'Instagram flagged automated activity (HTTP $code). Requests are '
           'paused to protect your account — open the Instagram app, clear any '
           'prompt, then wait before retrying.',
@@ -479,7 +488,9 @@ class DownloaderService {
           'body="${_safeBodySnippet(lowerBody, sessionId)}"');
       await RateGuard.instance.triggerChallengeCooldown(
           reason: softPushback, statusCode: resp.statusCode);
-      throw Exception(
+      // RateLimitException for the same type-based classification reason as
+      // the DioException branch above.
+      throw RateLimitException(
         'Instagram flagged automated activity. Requests are paused to protect '
         'your account — open the Instagram app, clear any prompt, then wait '
         'before retrying.',
