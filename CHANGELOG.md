@@ -1,5 +1,28 @@
 # Changelog
 
+## [2026-08-18] — Session: Tumblr support, avatar filtering, dedup & IG flag recovery
+
+### Added
+- feat(downloader): WebView fallback for pages behind a JavaScript anti-bot challenge. Tumblr post pages are served by Automattic's hashcash gate — HTTP 403 whose body is "Checking your browser… Javascript required", with a SHA-256 proof-of-work POSTed to `/__challenge` and a short-lived `_hcc` cookie — which a plain `Dio.get()` can never satisfy. Such pages are now re-fetched through a real `WebViewController` so the page's own JS solves the challenge, then the rendered DOM is scraped. Stays invisible while polling; if it can't clear within 20s it reveals the WebView so the user can tap "I am human" ([eb8408d])
+- feat(downloader): direct media URLs (`.jpg/.jpeg/.png/.webp/.gif/.mp4/.mov`) download as-is instead of being fed to the HTML article parser, which previously tried to parse raw image bytes as a page and failed with "No downloadable images found" ([eb8408d])
+- feat(dedup): `download_ledger_service` — a SharedPreferences-backed record of what has been downloaded, keyed on `username + hash(mediaUrl)` and deliberately **date-independent**. Already-downloaded items are filtered out of the selection grid entirely; a fully-filtered post shows "All N items already downloaded" rather than an empty grid, which would be indistinguishable from a failed scrape. Capped at 5000 keys, oldest evicted ([d629342])
+- feat(rateguard): the Instagram challenge cooldown can now end early. `maybeReprobe()` makes one lightweight authenticated probe per 5 minutes and clears the block only on a confirmed clean response — failing closed on pushback or any network error. Adds a "Check now" banner action and a reminder SnackBar on early recovery ([dbb819b])
+
+### Fixed
+- fix(filters): profile icons and avatars were downloaded as post media from Tumblr and Facebook. Three causes: junk detection inspected only the URL string and discarded the `<img>` element's `class`/`id`/`alt`; the size gate read only the `width`/`height` attributes and **silently no-opped when both were absent** (normal for Tumblr's lazy-loaded markup), so a 32×32 avatar passed ungated; and no content selector matched Tumblr, so the scan scope fell back to the whole `<body>` including the header avatar. Added shared `image_junk_filter`, attribute-aware detection, a size gate that falls back to inline `style` → URL size hints → a `WxH` filename pattern, and Tumblr-aware selectors ([dbb819b])
+- fix(dedup): dedup relied on `filenameBase` matching, but that embeds a date and Facebook/Threads/LIHKG stamp `postTimestamp: now` on every fetch — so re-downloading a post on a later day produced a genuine duplicate file. It also only ran at download time, so duplicates still filled the grid. The date-independent ledger fixes both without renaming anything already on disk ([d629342])
+- fix(downloader): genuine non-challenge 403s (paywall, geo-block, IP ban) kept their clear "Failed to load page (403)" error instead of having the error page HTML-parsed as content — which could otherwise scrape a branded "access denied" graphic and present it as downloadable media ([eb8408d])
+- fix(ui): the media-items provider is now `autoDispose` with a cancellation guard, so a fetch abandoned mid-flight can no longer pop a verification WebView over an unrelated screen ([eb8408d])
+
+### Changed
+- refactor(services): extracted the real-Chrome mobile UA into one `kRealChromeMobileUA` constant (was duplicated across `login_screen`, `in_app_browser_screen`); extracted `isPushback()` into `RateGuard` so it is shared rather than duplicated; extracted `MediaItem.hashMediaUrl` so the ledger and `filenameBase` share one hash and cannot drift; collapsed Facebook's four copy-pasted junk blacklists into the shared helper ([eb8408d], [dbb819b], [d629342])
+- refactor(ui): the challenge banner now says logged-in requests are *limited* rather than *paused*. The block only ever gated the private-API Dio path — `_fetchIgItems` swallows the rate-limit exception and falls through to HTML-scraping strategies that never consulted `RateGuard`, so public posts kept downloading while the banner claimed otherwise ([dbb819b])
+
+### Notes
+- The in-app browser is unaffected by the Instagram block by design: it is a WebView against ordinary `www.instagram.com` using the OS cookie jar, with no reference to `RateGuard`, while the block gates only Dio calls to the account-attributed `i.instagram.com` private API.
+- **Untested on device at time of writing.** All four features pass `flutter analyze` at baseline and compile, but none has been exercised against live traffic. Specifically unverified: whether an invisible WebView keeps executing JS on Android (it may need the manual reveal path), and whether the `accounts/current_user/` probe endpoint behaves as assumed against a live Instagram block.
+- CLAUDE.md's storage section is inaccurate: files land in a flat `Download/ig_downloader/` (no dated subfolders), `gal` is declared but never imported (Android uses a native MediaScanner channel), and iOS has no gallery-save step at all.
+
 ## [2026-06-23] — Session: v1.1 — login block detection & browser escape hatch
 
 ### Added
