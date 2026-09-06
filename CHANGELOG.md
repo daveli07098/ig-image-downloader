@@ -21,6 +21,7 @@
 - fix(threads): the `i.instagram.com` fallback was outside RateGuard — same endpoint the Instagram path protects, called unguarded up to 3× per fetch ([4e8e56c])
 - fix(threads): quality pickers replace `.first`; mixed carousels keep their photos; `video_versions` presence classifies video when `media_type` is absent ([4e8e56c])
 - fix(queue): download-stage failures are now logged, not only shown on a deletable job tile ([4e8e56c])
+- fix(threads): the WebView resolution could pick an unrelated post from the logged-in feed when a share link hit the login gate; a post code is now accepted only from the WebView's final URL or canonical tag, gate hits raise the "not available" error, the WebView is reached through SelectionScreen's cancellable callback, and a 45s hard deadline / main-frame error pops it on its own ([516a83e])
 
 ### Changed
 - Filenames/ledger keys: `tumblr_com_*` → `<blog>_*`, `threads_*` → `<handle>_*`. Previously downloaded Tumblr/Threads posts appear as new once.
