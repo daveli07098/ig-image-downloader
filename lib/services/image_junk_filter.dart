@@ -30,17 +30,32 @@ bool isJunkUrl(String url) {
   return junkMarkers.any(lower.contains);
 }
 
+/// Alt-text markers unambiguous enough to flag an image as junk from `alt`
+/// alone. The full [junkMarkers] list includes generic words — "icon",
+/// "logo", "pixel", "sprite" — that show up in legitimate alt text on real
+/// content, especially Tumblr art posts ("pixel art icon commission", "sprite
+/// sheet WIP"), so matching the full list against `alt` silently drops real
+/// images. These three are never legitimately part of real content alt text.
+const _altOnlyJunkMarkers = ['avatar', 'gravatar', 'favicon'];
+
 /// True if the image's URL OR any of its structural attributes (`class`,
 /// `id`, `alt`) carry an avatar/icon marker. Element attributes are a signal
 /// that URL-only filtering throws away — e.g. a Tumblr blog avatar commonly
 /// renders as `class="avatar-image"` even when its CDN URL looks like any
-/// other content image and gives no textual hint on its own.
+/// other content image and gives no textual hint on its own. `alt` is
+/// matched only against [_altOnlyJunkMarkers] (see its doc comment) — `class`
+/// and `id` keep the full [junkMarkers] match since real content never
+/// legitimately carries those in its class/id.
 bool isJunkElement({String? url, String? className, String? id, String? alt}) {
   if (url != null && isJunkUrl(url)) return true;
-  for (final attr in [className, id, alt]) {
+  for (final attr in [className, id]) {
     if (attr == null) continue;
     final lower = attr.toLowerCase();
     if (junkMarkers.any(lower.contains)) return true;
+  }
+  if (alt != null) {
+    final lower = alt.toLowerCase();
+    if (_altOnlyJunkMarkers.any(lower.contains)) return true;
   }
   return false;
 }

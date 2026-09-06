@@ -1,0 +1,39 @@
+<!--
+Hand-built DOM-only fixture — the <head> og:video/og:image meta block plus the
+<video><source> markup from the real saved page (see
+lib/services/generic_article_downloader_service.dart's Tumblr NPF comment for
+the field-verified source), with the #___INITIAL_STATE___ NPF script tag
+deliberately OMITTED so tests using this fixture exercise the DOM-scraping
+fallback path (_extractVideos / _dedupeKey / isJunkElement), not the NPF
+parser. It also throws in an <img> using the poster URL directly (as some
+Tumblr theme markup does) and an avatar <img> with alt="Avatar", to prove the
+poster-suppression-via-dedupe and the alt-marker restriction both hold.
+-->
+<!DOCTYPE html>
+<html>
+<head>
+<meta content="video" property="og:type"/>
+<meta content="https://64.media.tumblr.com/2087b0c4d6390f09ed70977e98deeb17/5cff472a284c7339-ec/s720/47253194c7a23ad9808ae59658766c4b4da1692f.mov" property="og:video"/>
+<meta content="video/mp4" property="og:video:type"/>
+<meta content="1080" property="og:video:width"/>
+<meta content="1920" property="og:video:height"/>
+<meta content="https://44.media.tumblr.com/2087b0c4d6390f09ed70977e98deeb17/5cff472a284c7339-ec/s1080x1920_f1/67ae0f6aa40ca0799e9c2ac8f5029d426765338a.jpg" property="og:image"/>
+<meta content="1080" property="og:image:width"/>
+<meta content="1920" property="og:image:height"/>
+<meta content="image/jpeg" property="og:image:type"/>
+</head>
+<body>
+<article>
+  <img alt="Avatar" width="200" height="200" src="https://64.media.tumblr.com/69df3b7cef52b269a9893ee8ba6b72f9/11c1a674ff772952-69/s200x200u_c1/bce5eec7c3a85e3720cf28f1a3f9f2dad2d43e9a.pnj"/>
+  <div class="ypwxx">
+    <video muted style="min-height:250px" crossorigin="anonymous" playsinline height="1920" width="1080" poster="https://44.media.tumblr.com/2087b0c4d6390f09ed70977e98deeb17/5cff472a284c7339-ec/s1080x1920_f1/67ae0f6aa40ca0799e9c2ac8f5029d426765338a.jpg" controlsList="nodownload">
+      <source src="https://64.media.tumblr.com/2087b0c4d6390f09ed70977e98deeb17/5cff472a284c7339-ec/s720/47253194c7a23ad9808ae59658766c4b4da1692f.mov" type="video/mp4"/>
+    </video>
+  </div>
+  <!-- Same poster frame, also rendered as a plain <img> — must be
+       suppressed as a duplicate of the video's poster, not emitted as a
+       second downloadable image. -->
+  <img width="1080" height="1920" src="https://44.media.tumblr.com/2087b0c4d6390f09ed70977e98deeb17/5cff472a284c7339-ec/s1080x1920_f1/67ae0f6aa40ca0799e9c2ac8f5029d426765338a.jpg"/>
+</article>
+</body>
+</html>

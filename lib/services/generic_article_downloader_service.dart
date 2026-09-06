@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
@@ -5,6 +7,7 @@ import 'package:html/dom.dart' as dom;
 import '../models/media_item.dart';
 import 'image_junk_filter.dart';
 import 'js_challenge_detector.dart';
+import 'webview_user_agent.dart';
 
 /// Internal signal thrown by [GenericArticleDownloaderService._fetchPlain]
 /// when a 403 response's body was confirmed (via [looksLikeJsChallenge]) to
@@ -17,30 +20,41 @@ class _JsChallengeResponse implements Exception {
   final String html;
 }
 
-/// General-purpose article / forum image downloader.
+/// General-purpose article / forum image AND video downloader.
 ///
 /// Works for any webpage — detection is structural (inspects HTML) rather than
 /// domain-based. Tuned for modern news sites and forums:
 ///   * lazy-loaded images (`data-src`, `data-original`, `data-lazy-src`)
 ///   * responsive `srcset` (picks the highest-resolution candidate)
 ///   * `<picture><source srcset>` and `<figure><img>`
+///   * `og:video(:url)` meta + `<video>`/`<source>` (poster frame becomes a
+///     thumbnail, never a separate downloadable item)
 ///   * relative URLs resolved against the page URL
 ///   * og:image as a seed
 ///   * junk filtering (icons, avatars, logos, spacers, tracking pixels, SVG)
 ///
+/// Tumblr has no dedicated scraper/service of its own; its posts are handled
+/// entirely by this class, via two paths (see [_parseTumblrState] and
+/// [_parsePage]):
+///   1. PRIMARY — Tumblr's NPF (Neue Post Format) JSON, embedded in every
+///      page as `<script id="___INITIAL_STATE___">`. The only path that
+///      works for community-labelled (mature/sensitive) posts, which serve
+///      an empty client-rendered shell to the DOM path below.
+///   2. FALLBACK — structural DOM scraping, same as any other site.
+///
 /// Extraction strategy:
-///   1. Fetch the page with a desktop browser user-agent.
+///   1. Fetch the page with a mobile Chrome user-agent (see [kRealChromeMobileUA]
+///      — a desktop UA gets a 403 anti-bot challenge from some sites, e.g.
+///      Tumblr, that a mobile UA sails through with a plain 200).
 ///   2. Pick the best article-content container; fall back to <body>.
 ///   3. Collect every candidate image, choosing the largest variant available.
 ///   4. Drop obvious non-content images and de-duplicate.
 class GenericArticleDownloaderService {
-  static const _ua =
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
-      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
   // CSS selectors tried in order — first match wins. Covers common news themes,
-  // WordPress, generic semantic markup, and Tumblr (which has no dedicated
-  // scraper and always falls through to this one).
+  // WordPress, generic semantic markup, and Tumblr's DOM-fallback markup (see
+  // the class doc comment — Tumblr's primary path is the NPF JSON parser,
+  // not this selector list).
   static const _contentSelectors = [
     '.td-post-content',          // Newspaper / tagDiv theme
     '.entry-content',            // Genesis, Twenty-*, most WP themes
@@ -73,7 +87,7 @@ class GenericArticleDownloaderService {
               followRedirects: true,
               maxRedirects: 8,
               headers: {
-                'User-Agent': _ua,
+                'User-Agent': kRealChromeMobileUA,
                 'Accept-Language': 'en-US,en;q=0.9',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
               },
@@ -92,8 +106,10 @@ class GenericArticleDownloaderService {
 
   // ── Fetch items ──────────────────────────────────────────────────────────
 
-  /// Fetches [url], checks structure, and returns all article images.
-  /// Throws a descriptive [Exception] if the page has no usable images.
+  /// Fetches [url] and returns every downloadable image/video found on it —
+  /// via Tumblr's NPF JSON when present (see [_parseTumblrState]), else via
+  /// structural DOM scraping. Throws a descriptive [Exception] if the page
+  /// has no usable media.
   ///
   /// Fast path: a plain Dio GET (no JS). If that comes back blocked — a 403
   /// confirmed as an anti-bot challenge, or a 200 whose body is itself a JS
@@ -115,6 +131,16 @@ class GenericArticleDownloaderService {
       html = await _resolveChallenge(cleanUrl);
       return _parsePage(html, cleanUrl);
     }
+
+    // Tumblr posts with a community label (mature/sensitive content) serve a
+    // bare client-rendered shell on a normal 200 — no <img>, no og:image, and
+    // a useless "Tumblr" <title> — so looksLikeJsChallenge would never flag
+    // it and the DOM path below would find nothing. The real post is still
+    // embedded as NPF JSON in a #___INITIAL_STATE___ script tag, so that is
+    // tried FIRST and unconditionally, ahead of the challenge check, rather
+    // than relying on any signal in the (possibly empty) shell HTML.
+    final npf = _parseTumblrState(html, cleanUrl);
+    if (npf != null && npf.isNotEmpty) return npf;
 
     if (looksLikeJsChallenge(html, wasForbidden: false)) {
       html = await _resolveChallenge(cleanUrl);
@@ -167,6 +193,15 @@ class GenericArticleDownloaderService {
   }
 
   List<MediaItem> _parsePage(String html, String pageUrl) {
+    // Covers HTML that reaches here via the WebView challenge fallback or the
+    // confirmed-403-challenge branch — both skip fetchItems' own NPF check,
+    // and Tumblr's rendered/challenge-cleared page still carries the same
+    // #___INITIAL_STATE___ script tag. Re-parsing an HTML string that turns
+    // out not to be a Tumblr NPF page is a cheap no-op (see
+    // _parseTumblrState), so this is safe to try unconditionally.
+    final npf = _parseTumblrState(html, pageUrl);
+    if (npf != null && npf.isNotEmpty) return npf;
+
     final document = html_parser.parse(html);
 
     // Post timestamp from <time datetime="..."> if present
@@ -177,55 +212,360 @@ class GenericArticleDownloaderService {
       if (dt != null) postTimestamp = dt.millisecondsSinceEpoch ~/ 1000;
     }
 
-    // Derive a display name from the hostname
+    // Derive a display name from the hostname, with a Tumblr-specific
+    // override — see _siteName.
     final host = Uri.tryParse(pageUrl)?.host ?? 'article';
-    final siteName = host.replaceFirst('www.', '').replaceAll('.', '_');
+    final siteName = _siteName(pageUrl);
 
     // Prefer the article container, but fall back to the whole body so news
     // layouts that don't use a recognised content class still work.
     final scope =
         _findContent(document) ?? document.body ?? document.documentElement!;
 
+    // Videos: og:video(:url) meta (checked against the whole document — it
+    // lives in <head>, and acts as a safety net if a theme renders the
+    // player outside the matched content container) + <video>/<source>
+    // elements WITHIN [scope] only — matching _extractImages' scoping so a
+    // header autoplay loop, sidebar promo, or video ad elsewhere on the page
+    // is never picked up as post content. Their poster frame becomes a
+    // thumbnail, never a separate downloadable item — see _extractVideos and
+    // _dedupeKey (which collapses a video and its poster to the same key on
+    // Tumblr's media CDN).
+    final videos = _extractVideos(document, scope, pageUrl);
+
     final srcs = _extractImages(scope, pageUrl);
 
-    // Seed with og:image so the lead photo is never missed.
-    final og = document
+    // Seed with og:image so the lead photo is never missed. `seen` starts
+    // pre-loaded with every video's own URL + poster key so a video post's
+    // poster frame (also commonly served as og:image and/or a plain <img>)
+    // is never ALSO emitted as a separate downloadable image.
+    final ogRaw = document
         .querySelector('meta[property="og:image"]')
         ?.attributes['content'];
+    final og = ogRaw != null ? _resolveUrl(ogRaw, pageUrl) : null;
     final ordered = <String>[];
-    final seen = <String>{};
-    void add(String? s) {
-      if (s == null) return;
-      final r = _resolveUrl(s, pageUrl);
+    final seen = <String>{
+      for (final v in videos) _dedupeKey(v.url),
+      for (final v in videos)
+        if (v.poster != null) _dedupeKey(v.poster!),
+    };
+    void add(String? r) {
       if (r != null && seen.add(_dedupeKey(r))) ordered.add(r);
     }
 
     add(og);
     for (final s in srcs) {
-      add(s);
+      add(_resolveUrl(s, pageUrl));
     }
 
-    if (ordered.isEmpty) {
+    if (ordered.isEmpty && videos.isEmpty) {
       throw Exception(
-        'No downloadable images found on this page.\n'
-        'It may be text/video only, or the images load via a script this app '
+        'No downloadable media found on this page.\n'
+        'It may be text-only, or the media loads via a script this app '
         'cannot run.',
       );
     }
 
-    debugPrint('[Article] Found ${ordered.length} images on $host');
-    return [
-      for (var i = 0; i < ordered.length; i++)
-        MediaItem(
-          id: '$i',
-          mediaUrl: ordered[i],
-          thumbnailUrl: ordered[i],
-          type: MediaItemType.image,
-          username: siteName,
-          itemIndex: i + 1,
-          postTimestamp: postTimestamp,
-        ),
-    ];
+    debugPrint(
+        '[Article] Found ${videos.length} videos, ${ordered.length} images on $host');
+
+    final items = <MediaItem>[];
+    var index = 1;
+    for (final v in videos) {
+      items.add(MediaItem(
+        id: '${index - 1}',
+        mediaUrl: v.url,
+        thumbnailUrl: v.poster ?? og,
+        type: MediaItemType.video,
+        username: siteName,
+        itemIndex: index,
+        postTimestamp: postTimestamp,
+      ));
+      index++;
+    }
+    for (final s in ordered) {
+      items.add(MediaItem(
+        id: '${index - 1}',
+        mediaUrl: s,
+        thumbnailUrl: s,
+        type: MediaItemType.image,
+        username: siteName,
+        itemIndex: index,
+        postTimestamp: postTimestamp,
+      ));
+      index++;
+    }
+    return items;
+  }
+
+  /// Display name for [pageUrl]'s host, with a Tumblr-specific override.
+  /// Every Tumblr blog otherwise collapses to the same "tumblr_com" name
+  /// because the host is always (www.)tumblr.com (blog name lives in the
+  /// path: tumblr.com/<blog>/<id>) or <blog>.tumblr.com (blog name is the
+  /// subdomain: <blog>.tumblr.com/post/<id>/...). Falls back to the plain
+  /// host-derived name — unchanged — for custom domains and every
+  /// non-Tumblr site.
+  static String _siteName(String pageUrl) {
+    final uri = Uri.tryParse(pageUrl);
+    final host = uri?.host ?? 'article';
+    final bareHost = host.replaceFirst('www.', '');
+
+    if (bareHost == 'tumblr.com' && uri != null) {
+      final segs = uri.pathSegments.where((s) => s.isNotEmpty).toList();
+      if (segs.isNotEmpty) {
+        // Normally tumblr.com/<blog>/<id> — <blog> is segs.first. But some
+        // Tumblr URL shapes put extra path segments before the blog name
+        // (tumblr.com/blog/view/<blog>/<id>, tumblr.com/dashboard/blog/<blog>/<id>);
+        // when a numeric post id is found, the blog name is the segment
+        // immediately before it rather than always the first segment.
+        final idIndex = segs.indexWhere((s) => _numericIdRe.hasMatch(s));
+        if (idIndex > 0) return segs[idIndex - 1];
+        return segs.first;
+      }
+    } else if (bareHost.endsWith('.tumblr.com')) {
+      final blog =
+          bareHost.substring(0, bareHost.length - '.tumblr.com'.length);
+      if (blog.isNotEmpty) return blog;
+    }
+
+    return bareHost.replaceAll('.', '_');
+  }
+
+  /// Video URLs + their poster/thumbnail frame from <meta property="og:video">
+  /// / "og:video:url" (checked against [document] — always in <head>) and
+  /// <video>/<video><source> elements found within [scope] (the same content
+  /// container [_extractImages] is confined to, so a header/sidebar/ad video
+  /// elsewhere on the page is never mistaken for post content). The poster
+  /// is carried alongside the video (as [MediaItem.thumbnailUrl] via
+  /// [_parsePage]) rather than returned as a separate downloadable item —
+  /// otherwise a video post yields both the .mov/.mp4 AND the identical
+  /// poster frame as a .jpg.
+  static List<({String url, String? poster})> _extractVideos(
+      dom.Document document, dom.Element scope, String pageUrl) {
+    final out = <({String url, String? poster})>[];
+    final seen = <String>{};
+
+    void add(String? rawUrl, String? rawPoster) {
+      if (rawUrl == null) return;
+      final url = _resolveUrl(rawUrl, pageUrl);
+      if (url == null || !seen.add(_dedupeKey(url))) return;
+      final poster =
+          rawPoster != null ? _resolveUrl(rawPoster, pageUrl) : null;
+      out.add((url: url, poster: poster));
+    }
+
+    for (final video in scope.querySelectorAll('video')) {
+      final poster = video.attributes['poster'];
+      final directSrc = video.attributes['src'];
+      if (directSrc != null && directSrc.trim().isNotEmpty) {
+        add(directSrc, poster);
+      }
+      for (final source in video.querySelectorAll('source')) {
+        final type = source.attributes['type'] ?? '';
+        if (type.isNotEmpty && !type.startsWith('video/')) continue;
+        add(source.attributes['src'], poster);
+      }
+    }
+
+    // og:video / og:video:url meta as a seed — some pages (including
+    // Tumblr's server-rendered fallback markup) expose the video only via
+    // meta tags, with no <video> element at all.
+    final ogVideo = document
+            .querySelector('meta[property="og:video:url"]')
+            ?.attributes['content'] ??
+        document
+            .querySelector('meta[property="og:video"]')
+            ?.attributes['content'];
+    if (ogVideo != null) {
+      final ogImage = document
+          .querySelector('meta[property="og:image"]')
+          ?.attributes['content'];
+      add(ogVideo, ogImage);
+    }
+
+    return out;
+  }
+
+  // ── Tumblr NPF (Neue Post Format) JSON extraction ───────────────────────
+  //
+  // Tumblr's React app embeds the full initial page state — including every
+  // post's structured content blocks — as JSON in a
+  // <script type="application/json" id="___INITIAL_STATE___"> tag (a plain
+  // JSON blob, not a `window.___INITIAL_STATE___ = …` assignment). This is
+  // the ONLY reliable source for posts Tumblr flags with a community label
+  // (mature/sensitive content): those serve a bare client-rendered shell
+  // with no <img>, no og:image, and a useless "Tumblr" <title> — nothing for
+  // the DOM scraper below (or even the WebView, which shows a "mature
+  // content" interstitial instead of the post) to find. It is tried BEFORE
+  // the DOM path for every Tumblr page, not just the community-labelled
+  // ones, since it is strictly more accurate when present (native
+  // resolution, real blog name, real timestamp) and falls through cleanly
+  // (returns null) for any page that doesn't have it.
+
+  /// Parses the `#___INITIAL_STATE___` NPF JSON blob in [html], if present,
+  /// into the target post's [MediaItem]s. Returns null — never throws — when
+  /// the script tag is absent, isn't valid JSON, or doesn't have the
+  /// expected shape, so callers can unconditionally fall back to DOM
+  /// scraping. Returns an empty list only if the post was found but truly
+  /// has no downloadable image/video content blocks.
+  static List<MediaItem>? _parseTumblrState(String html, String pageUrl) {
+    // Cheap pre-check so the (much more common) non-Tumblr / no-NPF path
+    // never pays for a full HTML parse just to discover the script tag isn't
+    // there — this function runs up to twice per fetch (fetchItems + _parsePage).
+    if (!html.contains('___INITIAL_STATE___')) return null;
+    try {
+      final document = html_parser.parse(html);
+      final scriptEl = document.querySelector('script#___INITIAL_STATE___');
+      final raw = scriptEl?.text;
+      if (raw == null || raw.trim().isEmpty) return null;
+
+      final state = jsonDecode(raw);
+      if (state is! Map) return null;
+      final peeprRoute = state['PeeprRoute'];
+      if (peeprRoute is! Map) return null;
+      final initialTimeline = peeprRoute['initialTimeline'];
+      if (initialTimeline is! Map) return null;
+      final objects = initialTimeline['objects'];
+      if (objects is! List || objects.isEmpty) return null;
+
+      final targetId = _postIdFromUrl(pageUrl);
+      Map? post;
+      if (targetId != null) {
+        for (final o in objects) {
+          if (o is Map && o['idString']?.toString() == targetId) {
+            post = o;
+            break;
+          }
+        }
+        // The URL named a specific post id and it isn't in this blob — do
+        // NOT silently fall back to objects.first (a DIFFERENT, unrelated
+        // post would be downloaded instead). Return null so the DOM path
+        // gets a chance instead.
+        if (post == null) return null;
+      } else {
+        post = objects.first is Map ? objects.first as Map : null;
+      }
+      if (post == null) return null;
+
+      // A reblog can have its own non-empty `content` that is text-only (a
+      // caption/commentary with no media blocks of its own) — checking only
+      // "is content empty" misses that case and never looks at the trail, so
+      // fall back to the trail whenever `content` has no image/video block,
+      // not only when it's empty outright.
+      var content = post['content'];
+      final hasOwnMedia = content is List &&
+          content.any((b) =>
+              b is Map && (b['type'] == 'image' || b['type'] == 'video'));
+      if (!hasOwnMedia) {
+        // The media lives on the last (most recent) entry of the reblog trail.
+        final trail = post['trail'];
+        if (trail is List && trail.isNotEmpty) {
+          final last = trail.last;
+          if (last is Map && last['content'] is List) {
+            content = last['content'] as List;
+          }
+        }
+      }
+      if (content is! List || content.isEmpty) return null;
+
+      final username = post['blogName']?.toString() ?? _siteName(pageUrl);
+      final ts = post['timestamp'];
+      final postTimestamp =
+          ts is num ? ts.toInt() : int.tryParse(ts?.toString() ?? '');
+
+      final items = <MediaItem>[];
+      var videoCount = 0;
+      var imageCount = 0;
+      for (final block in content) {
+        if (block is! Map) continue;
+        final type = block['type'];
+        if (type == 'video') {
+          // Per NPF, a missing `provider` means a native Tumblr-hosted
+          // video (only explicit non-Tumblr providers — e.g. embedded
+          // YouTube — are not directly downloadable and get skipped).
+          final provider = block['provider'];
+          if (provider != null && provider != 'tumblr') {
+            continue;
+          }
+          final media = block['media'];
+          final videoUrl = (media is Map ? media['url'] : null)?.toString() ??
+              block['url']?.toString();
+          if (videoUrl == null) continue;
+          String? poster;
+          final posterList = block['poster'];
+          if (posterList is List && posterList.isNotEmpty) {
+            final first = posterList.first;
+            if (first is Map) poster = first['url']?.toString();
+          }
+          videoCount++;
+          items.add(MediaItem(
+            id: '${items.length}',
+            mediaUrl: videoUrl,
+            thumbnailUrl: poster,
+            type: MediaItemType.video,
+            username: username,
+            itemIndex: items.length + 1,
+            postTimestamp: postTimestamp,
+          ));
+        } else if (type == 'image') {
+          final variants = block['media'];
+          if (variants is! List || variants.isEmpty) continue;
+          Map? best;
+          num bestWidth = -1;
+          for (final v in variants) {
+            if (v is! Map) continue;
+            if (v['cropped'] == true) continue;
+            if (v['hasOriginalDimensions'] == true) {
+              best = v;
+              break;
+            }
+            final w = v['width'];
+            if (w is num && w > bestWidth) {
+              bestWidth = w;
+              best = v;
+            }
+          }
+          final imageUrl = best?['url']?.toString();
+          if (imageUrl == null) continue;
+          imageCount++;
+          items.add(MediaItem(
+            id: '${items.length}',
+            mediaUrl: imageUrl,
+            thumbnailUrl: imageUrl,
+            type: MediaItemType.image,
+            username: username,
+            itemIndex: items.length + 1,
+            postTimestamp: postTimestamp,
+          ));
+        }
+      }
+
+      debugPrint(
+          '[Article] Tumblr NPF: $imageCount images, $videoCount videos');
+      return items;
+    } catch (e) {
+      // Malformed/unexpected JSON shape — fall back to DOM scraping rather
+      // than surfacing a parse error for what may just be a non-Tumblr page.
+      debugPrint('[Article] Tumblr NPF parse failed, falling back: $e');
+      return null;
+    }
+  }
+
+  static final RegExp _numericIdRe = RegExp(r'^\d{10,}$');
+
+  /// Extracts the numeric post id from a Tumblr URL — either
+  /// `tumblr.com/<blog>/<id>` or `<blog>.tumblr.com/post/<id>/<slug>` — as
+  /// the first all-digit path segment of at least 10 characters (Tumblr post
+  /// ids are large snowflake-style integers, long enough that this can't
+  /// collide with a blog name or the literal "post" segment). Returns null
+  /// if the URL has no such segment.
+  static String? _postIdFromUrl(String pageUrl) {
+    final uri = Uri.tryParse(pageUrl);
+    if (uri == null) return null;
+    for (final seg in uri.pathSegments) {
+      if (_numericIdRe.hasMatch(seg)) return seg;
+    }
+    return null;
   }
 
   // ── Private helpers ──────────────────────────────────────────────────────
@@ -378,7 +718,29 @@ class GenericArticleDownloaderService {
     }
   }
 
+  // Tumblr media path shape: /<hash1>/<hash2>/s<WxH>[_fN]/<filename>.<ext> —
+  // resolution lives in this path segment rather than the query string.
+  static final RegExp _tumblrSizeSegmentRe =
+      RegExp(r'/s\d+(?:x\d+)?(?:_f\d+)?/');
+
   /// De-dupe key that collapses the same image requested with different query
-  /// params (common with CDN resize params) while keeping distinct paths apart.
-  static String _dedupeKey(String url) => url.split('?').first;
+  /// params (common with CDN resize params) while keeping distinct paths
+  /// apart.
+  ///
+  /// For Tumblr's media CDN (`*.media.tumblr.com`) this also strips the
+  /// resolution path segment AND everything after it (host and filename
+  /// included): both the CDN shard host (44.media vs 64.media) and the
+  /// filename hash after the size segment vary between renditions of the
+  /// SAME underlying asset — e.g. a video and its auto-extracted poster
+  /// frame, or the same photo served at two sizes — so keying on just the
+  /// pre-size path collapses them into one item instead of downloading both.
+  static String _dedupeKey(String url) {
+    final noQuery = url.split('?').first;
+    final uri = Uri.tryParse(noQuery);
+    if (uri != null && uri.host.endsWith('tumblr.com')) {
+      final m = _tumblrSizeSegmentRe.firstMatch(uri.path);
+      if (m != null) return uri.path.substring(0, m.start);
+    }
+    return noQuery;
+  }
 }

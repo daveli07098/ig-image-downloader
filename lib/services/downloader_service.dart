@@ -162,13 +162,74 @@ class DownloaderService {
   /// than an HTML page. Checked against the path only (query string stripped)
   /// so CDN cache-busting params (`?resize=…`) don't defeat the match.
   static const _directMediaExtensions = [
-    '.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov',
+    '.jpg', '.jpeg', '.png', '.webp', '.gif', '.mp4', '.mov', '.pnj',
   ];
 
   static bool _looksLikeDirectMediaUrl(String url) {
     final path = Uri.tryParse(url)?.path.toLowerCase() ??
         url.toLowerCase().split('?').first;
     return _directMediaExtensions.any(path.endsWith);
+  }
+
+  // Real-extension → MIME map used by [extensionAndMime]'s ext/mime lookup.
+  // Split by media kind so a URL's own extension only overrides the default
+  // when its kind agrees with MediaItem.isVideo (see that method's doc
+  // comment). Tumblr's `.pnj` ("PNG in JPEG" — the bytes are a plain JPEG
+  // file) has no native Android/gallery support, so it maps to `jpg`/
+  // `image/jpeg` rather than being saved with a `.pnj` extension no viewer
+  // recognises.
+  static const _imageExtToMime = {
+    'jpg': 'image/jpeg',
+    'jpeg': 'image/jpeg',
+    'png': 'image/png',
+    'webp': 'image/webp',
+    'gif': 'image/gif',
+    'pnj': 'image/jpeg',
+  };
+  static const _videoExtToMime = {
+    'mp4': 'video/mp4',
+    'mov': 'video/quicktime',
+  };
+
+  /// Real (extension, MIME) for [item], derived from its media URL's own
+  /// path extension when that extension's kind (video vs. image) agrees with
+  /// [MediaItem.isVideo] — e.g. so a Tumblr `.gif` or `.mov` keeps its native
+  /// format instead of always being forced to `.jpg`/`.mp4` (a GIF saved as
+  /// `.jpg` will not animate). Falls back to the old `mp4`/`jpg` default
+  /// whenever the URL has no extension, or one that doesn't match the item's
+  /// real kind.
+  ///
+  /// NOT byte-identical for every platform: this is shared code, so an
+  /// Instagram/X/Facebook/Threads CDN URL that happens to carry a real
+  /// `.webp`/`.png`/`.gif` extension now keeps it too, instead of always
+  /// being forced to `.jpg`/`image/jpeg` — an intentional correctness fix
+  /// (the old behaviour mislabeled those files), not a regression, but worth
+  /// knowing this method's effect isn't Tumblr-only. Most of those CDN URLs
+  /// still have no filename extension at all, or a query string instead, so
+  /// the common case (falls back to the old default) is unaffected.
+  ///
+  /// Public (with [visibleForTesting]) only so unit tests can exercise this
+  /// pure, stateless mapping directly instead of going through the
+  /// filesystem/platform-channel-heavy [downloadItem]; not intended for use
+  /// outside this class.
+  @visibleForTesting
+  static ({String ext, String mime}) extensionAndMime(MediaItem item) {
+    final defaultExt = item.isVideo ? 'mp4' : 'jpg';
+    final defaultMime = item.isVideo ? 'video/mp4' : 'image/jpeg';
+    final path =
+        Uri.tryParse(item.mediaUrl)?.path ?? item.mediaUrl.split('?').first;
+    final dot = path.lastIndexOf('.');
+    if (dot == -1 || dot == path.length - 1) {
+      return (ext: defaultExt, mime: defaultMime);
+    }
+    final urlExt = path.substring(dot + 1).toLowerCase();
+    final table = item.isVideo ? _videoExtToMime : _imageExtToMime;
+    final mime = table[urlExt];
+    if (mime == null) return (ext: defaultExt, mime: defaultMime);
+    // .pnj bytes are a plain JPEG — save with the extension Android's
+    // gallery/media scanner actually recognises.
+    final ext = urlExt == 'pnj' ? 'jpg' : urlExt;
+    return (ext: ext, mime: mime);
   }
 
   Future<FetchResult> _fetchIgItems(String igUrl) async {
@@ -857,7 +918,7 @@ class DownloaderService {
     MediaItem item, {
     required void Function(double progress) onProgress,
   }) async {
-    final ext = item.isVideo ? 'mp4' : 'jpg';
+    final (:ext, mime: mimeType) = extensionAndMime(item);
     final saveDir = await StorageService.getOrCreateSaveDir(item.username);
     final filename = '${item.filenameBase}.$ext';
     final savePath = '${saveDir.path}/$filename';
@@ -924,7 +985,6 @@ class DownloaderService {
     // media browser (gallery apps, Files app) immediately, without copying
     // it into Pictures.
     if (defaultTargetPlatform == TargetPlatform.android) {
-      final mimeType = item.isVideo ? 'video/mp4' : 'image/jpeg';
       try {
         await _mediaScannerChannel.invokeMethod('scanFile', {
           'path': savePath,
