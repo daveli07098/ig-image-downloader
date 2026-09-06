@@ -24,16 +24,42 @@ Future<String> fetchRenderedHtml(
   String url, {
   Duration timeout = const Duration(seconds: 20),
 }) async {
-  final html = await Navigator.of(context, rootNavigator: true).push<String>(
+  final result = await _pushWebViewFetcher(context, url, timeout: timeout);
+  return result.html;
+}
+
+/// Like [fetchRenderedHtml], but also returns the WebView's final URL
+/// (`WebViewController.currentUrl()`, read once the DOM has settled) —
+/// [finalUrl] is null only if reading it failed. Used by
+/// [ThreadsDownloaderService] to resolve a `/share/`/`/t/` short link's
+/// canonical URL when that can only be discovered by actually rendering the
+/// page (e.g. it needs the logged-in cookie jar this WebView shares with the
+/// rest of the app, via the Android CookieManager). [fetchRenderedHtml]
+/// keeps its original signature/behavior unchanged for its existing caller.
+Future<({String html, String? finalUrl})> fetchRenderedHtmlWithUrl(
+  BuildContext context,
+  String url, {
+  Duration timeout = const Duration(seconds: 20),
+}) {
+  return _pushWebViewFetcher(context, url, timeout: timeout);
+}
+
+Future<({String html, String? finalUrl})> _pushWebViewFetcher(
+  BuildContext context,
+  String url, {
+  required Duration timeout,
+}) async {
+  final result = await Navigator.of(context, rootNavigator: true)
+      .push<({String html, String? finalUrl})>(
     MaterialPageRoute(
       builder: (_) => _WebViewHtmlFetcherScreen(url: url, timeout: timeout),
       fullscreenDialog: true,
     ),
   );
-  if (html == null) {
+  if (result == null) {
     throw Exception('Cancelled while verifying the page.');
   }
-  return html;
+  return result;
 }
 
 /// Decodes a `runJavaScriptReturningResult` value. Android wraps the returned
@@ -127,7 +153,18 @@ class _WebViewHtmlFetcherScreenState
       // generic_article_downloader_service.dart), so WEAK signals are trusted
       // here too — pass wasForbidden: true.
       if (!looksLikeJsChallenge(html, wasForbidden: true)) {
-        _finish(html);
+        // Read the WebView's current URL BEFORE popping — needed by callers
+        // that resolve a redirect/short-link via the rendered page (see
+        // fetchRenderedHtmlWithUrl); best-effort only, null on failure so a
+        // read error here can never block returning the HTML itself.
+        String? finalUrl;
+        try {
+          finalUrl = await _controller.currentUrl();
+        } catch (e) {
+          debugPrint('[WebViewHtmlFetcher] currentUrl() failed: $e');
+        }
+        if (!mounted) return;
+        _finish(html, finalUrl);
         return;
       }
 
@@ -147,11 +184,11 @@ class _WebViewHtmlFetcherScreenState
     }
   }
 
-  void _finish(String html) {
+  void _finish(String html, String? finalUrl) {
     if (_resolving || !mounted) return;
     _resolving = true;
     _pollTimer?.cancel();
-    Navigator.of(context).pop(html);
+    Navigator.of(context).pop((html: html, finalUrl: finalUrl));
   }
 
   @override

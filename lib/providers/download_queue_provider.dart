@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:uuid/uuid.dart';
@@ -342,6 +343,9 @@ class DownloadQueueNotifier extends StateNotifier<List<DownloadJob>> {
         _pruneFinished();
         return; // success
       } catch (e) {
+        // Logged here because the job tile is the only other place this error
+        // surfaces, and a tile can be deleted before anyone reads it.
+        debugPrint('[Queue] job $jobId attempt $attempt failed: $e');
         final isNetworkError = _isTransientNetworkError(e.toString());
         if (isNetworkError && attempt < maxAttempts) {
           // Exponential backoff: 2s, 4s before retries
