@@ -2,10 +2,20 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:html/parser.dart' as html_parser;
-import '../app.dart' show rootNavigatorKey;
 import '../models/media_item.dart';
 import 'rate_guard_service.dart';
-import 'webview_html_fetcher.dart' as webview_html_fetcher;
+
+/// Renders [url] in a real (JS-enabled, cookie-sharing) WebView and returns
+/// its HTML plus the final URL it landed on — see
+/// `webview_html_fetcher.fetchRenderedHtmlWithUrl`. Injected by the caller
+/// (ultimately `selection_screen.dart`, which owns the `BuildContext` and a
+/// `cancelled` flag tied to this fetch's lifecycle) rather than this service
+/// reaching for a root navigator key itself — an abandoned fetch (the user
+/// backed out of `SelectionScreen`) must never pop a full-screen WebView over
+/// whatever screen the user is on next. Null when the caller doesn't want to
+/// support this (or on platforms without a navigator context available).
+typedef ThreadsRenderedFetch = Future<({String html, String? finalUrl})>
+    Function(String url);
 
 /// Downloads media from Threads (threads.com / threads.net) posts.
 ///
@@ -111,6 +121,24 @@ class ThreadsDownloaderService {
     return re.firstMatch(url)?.group(1);
   }
 
+  /// Normalises a URL to `host+path` for equality comparisons that must
+  /// survive http→https and www./non-www. differences — a bare string
+  /// compare of full URLs would otherwise log a "resolved short link" (and,
+  /// worse, cache a bogus gate/dedup key) for a same-page scheme/host
+  /// normalisation that carries no new information. Query string is already
+  /// irrelevant here (callers strip it before comparing) and a trailing `/`
+  /// is trimmed so `/foo` and `/foo/` are the same page.
+  static String _normalizedHostPath(String url) {
+    final uri = Uri.tryParse(url);
+    if (uri == null) return url;
+    final host = uri.host.toLowerCase().replaceFirst(RegExp(r'^www\.'), '');
+    var path = uri.path;
+    if (path.length > 1 && path.endsWith('/')) {
+      path = path.substring(0, path.length - 1);
+    }
+    return '$host$path';
+  }
+
   /// Resolves a short link (`/share/<code>`, `/t/<code>`) using [realUri] —
   /// the final URL a request we already made landed on after Dio followed
   /// any redirect. No extra network request. `/share/` and `/t/` links match
@@ -132,7 +160,7 @@ class ThreadsDownloaderService {
       String? currentShortcode,
       String stepLabel) {
     final canonical = realUri.toString().split('?').first;
-    if (canonical == originalUrl) {
+    if (_normalizedHostPath(canonical) == _normalizedHostPath(originalUrl)) {
       return (
         username: currentUsername,
         shortcode: currentShortcode,
@@ -158,8 +186,20 @@ class ThreadsDownloaderService {
   /// [threadsSessionId] — the `sessionid` cookie captured from threads.com after IG
   /// login (different domain). Used directly for the threads.com REST API.
   /// As of 2025, Threads requires authentication for ALL content via their REST API.
+  ///
+  /// [renderedFetch] — optional WebView-backed fetch used ONLY to resolve a
+  /// `/share/`/`/t/` short link that stays unresolved after the anonymous
+  /// and authenticated-Dio attempts (see below); when null, that step is
+  /// skipped entirely rather than reaching for a root navigator itself —
+  /// this service must never push UI on its own. The caller (ultimately
+  /// `selection_screen.dart`) owns the `BuildContext` and is responsible for
+  /// making the callback throw/return null once the fetch has been
+  /// abandoned, exactly like the existing `renderedHtmlFallback` pattern in
+  /// `DownloaderService.fetchItems`.
   Future<List<MediaItem>> fetchItems(String url,
-      {String? igSessionId, String? threadsSessionId}) async {
+      {String? igSessionId,
+      String? threadsSessionId,
+      ThreadsRenderedFetch? renderedFetch}) async {
     final cleanUrl = url.split('?').first;
     debugPrint('[Threads] URL: $cleanUrl  session: ${igSessionId != null ? 'YES' : 'NO'}');
 
@@ -181,6 +221,16 @@ class ThreadsDownloaderService {
     // is NEVER used as a source for any strategy below, so its og:image
     // (the Threads LOGO) can never be "downloaded" as if it were the post.
     var hitInvalidPostGate = false;
+    // Normalised (host+path) keys of every URL a fetch already confirmed as
+    // the invalid-post gate THIS call — checked before every subsequent GET
+    // in this method so a gated URL is never re-fetched. Deliberately does
+    // NOT cache network exceptions/timeouts (those are transient and worth
+    // retrying elsewhere) — only a clean, confirmed gate response.
+    final gatedUrlKeys = <String>{};
+    void markGated(String triedUrl) =>
+        gatedUrlKeys.add(_normalizedHostPath(triedUrl));
+    bool isGated(String candidateUrl) =>
+        gatedUrlKeys.contains(_normalizedHostPath(candidateUrl));
 
     // ── Strategy 0 (PRIMARY): Googlebot UA → data-sjs ──────────────────────
     // A single unauthenticated GET (+1 request per fetch, no retry loop, no
@@ -196,6 +246,7 @@ class ThreadsDownloaderService {
           debugPrint('[Threads] Googlebot UA: invalid-post/login-gate redirect '
               '(${resp.realUri})');
           hitInvalidPostGate = true;
+          markGated(cleanUrl);
         } else {
           final crawlerHtml = resp.data!;
           final resolved = _resolveCanonical(
@@ -234,6 +285,15 @@ class ThreadsDownloaderService {
       _botDio.options.headers.remove('Cookie');
     }
 
+    // Cached HTML from the authenticated desktop/bot attempts below, keyed
+    // by intent rather than URL — reused by Strategy A/C further down so
+    // they never re-fetch cleanUrl with the SAME Dio+cookie state that
+    // already answered for it (request-budget fix, 2026-09-07: a gated
+    // `/share/` link with a session used to cost 6–9 GETs, several of them
+    // re-fetching cleanUrl after it had already come back gated).
+    String? preResolvedDesktopHtml;
+    String? preResolvedBotHtml;
+
     // ── Authenticated short-link resolution ────────────────────────────────
     // The anonymous Googlebot attempt above can't resolve every `/share/`/
     // `/t/` link — some posts (deleted, or visible only to logged-in users)
@@ -258,7 +318,9 @@ class ThreadsDownloaderService {
             debugPrint('[Threads] Desktop UA (threads-cookie): '
                 'invalid-post/login-gate redirect (${resp.realUri})');
             hitInvalidPostGate = true;
+            markGated(cleanUrl);
           } else {
+            preResolvedDesktopHtml = resp.data!;
             final resolved = _resolveCanonical(resp.realUri, cleanUrl,
                 username, shortcode, 'threads-cookie');
             username = resolved.username;
@@ -279,8 +341,16 @@ class ThreadsDownloaderService {
 
       if (shortcode == null) {
         try {
-          final webviewResult =
-              await _resolveViaWebView(cleanUrl, username, shortcode);
+          final webviewResult = await _resolveViaWebView(
+            cleanUrl,
+            username,
+            shortcode,
+            renderedFetch: renderedFetch,
+            onInvalidPostGate: () {
+              hitInvalidPostGate = true;
+              markGated(cleanUrl);
+            },
+          );
           if (webviewResult != null) {
             username = webviewResult.username;
             shortcode = webviewResult.shortcode;
@@ -306,10 +376,10 @@ class ThreadsDownloaderService {
     // GET before Strategy B's authenticated-API gate needs a real shortcode
     // to even attempt — the Desktop UA is known NOT to redirect `/share/`
     // links (see its own comment below), so this uses the bot UA, which
-    // does. The response is kept so the Strategy C bot-UA loop further down
-    // doesn't re-fetch the same URL.
-    String? preResolvedBotHtml;
-    if (shortcode == null && _isShortLink(cleanUrl)) {
+    // does. Skipped entirely if this exact URL already came back gated
+    // above (request-budget fix). The response is kept so the Strategy C
+    // bot-UA loop further down doesn't re-fetch the same URL.
+    if (shortcode == null && _isShortLink(cleanUrl) && !isGated(cleanUrl)) {
       try {
         final resp = await _botDio.get<String>(cleanUrl);
         if (resp.statusCode == 200 && resp.data != null) {
@@ -317,6 +387,7 @@ class ThreadsDownloaderService {
             debugPrint('[Threads] Bot UA short-link resolve: '
                 'invalid-post/login-gate redirect (${resp.realUri})');
             hitInvalidPostGate = true;
+            markGated(cleanUrl);
           } else {
             preResolvedBotHtml = resp.data!;
             final resolved = _resolveCanonical(
@@ -331,6 +402,9 @@ class ThreadsDownloaderService {
       } catch (e) {
         debugPrint('[Threads] Bot UA short-link resolve failed: $e');
       }
+    } else if (shortcode == null && _isShortLink(cleanUrl)) {
+      debugPrint('[Threads] Bot UA short-link resolve: skipping $cleanUrl '
+          '— already confirmed invalid-post gate');
     }
 
     // ── Strategy A: Desktop Chrome UA ────────────────────────────────────
@@ -349,36 +423,51 @@ class ThreadsDownloaderService {
       if (url != cleanUrl) url,
     }.toList();
 
-    for (final tryUrl in urlsToTry) {
-      try {
-        final resp = await _desktopDio.get<String>(tryUrl);
-        if (resp.statusCode == 200 && resp.data != null) {
-          if (_isInvalidPostResponse(resp.realUri)) {
-            debugPrint('[Threads] Desktop UA: invalid-post/login-gate '
-                'redirect ($tryUrl -> ${resp.realUri})');
-            hitInvalidPostGate = true;
-            continue; // never accept the login gate — try the next variant
-          }
-          desktopHtml = resp.data!;
-          debugPrint('[Threads] Desktop UA succeeded: $tryUrl');
-          // Resolve short links (/share/, /t/) — no extra request: Dio
-          // already followed any redirect to get here. Usually a no-op by
-          // this point (the Googlebot step above already resolved it), but
-          // covers the case where that step failed outright (network error)
-          // while this one still landed on the canonical URL.
-          final resolved = _resolveCanonical(
-              resp.realUri, cleanUrl, username, shortcode, 'desktop-ua');
-          username = resolved.username;
-          shortcode = resolved.shortcode;
-          if (resolved.canonicalUrl != null) {
-            canonicalUrl ??= resolved.canonicalUrl;
-            // Also worth trying for the bot-UA fallback below.
-            urlsToTry.add(resolved.canonicalUrl!);
-          }
-          break;
+    if (preResolvedDesktopHtml != null) {
+      // Already fetched cleanUrl with the exact same Dio+cookie state above
+      // (the threads-cookie short-link resolution step) — reuse it instead
+      // of fetching it again here.
+      desktopHtml = preResolvedDesktopHtml;
+      debugPrint('[Threads] Desktop UA: reusing threads-cookie response for '
+          '$cleanUrl (no re-fetch)');
+    } else {
+      for (final tryUrl in urlsToTry) {
+        if (isGated(tryUrl)) {
+          debugPrint('[Threads] Desktop UA: skipping $tryUrl — already '
+              'confirmed invalid-post gate');
+          continue;
         }
-      } catch (e) {
-        debugPrint('[Threads] Desktop UA failed ($tryUrl): $e');
+        try {
+          final resp = await _desktopDio.get<String>(tryUrl);
+          if (resp.statusCode == 200 && resp.data != null) {
+            if (_isInvalidPostResponse(resp.realUri)) {
+              debugPrint('[Threads] Desktop UA: invalid-post/login-gate '
+                  'redirect ($tryUrl -> ${resp.realUri})');
+              hitInvalidPostGate = true;
+              markGated(tryUrl);
+              continue; // never accept the login gate — try the next variant
+            }
+            desktopHtml = resp.data!;
+            debugPrint('[Threads] Desktop UA succeeded: $tryUrl');
+            // Resolve short links (/share/, /t/) — no extra request: Dio
+            // already followed any redirect to get here. Usually a no-op by
+            // this point (the Googlebot step above already resolved it), but
+            // covers the case where that step failed outright (network error)
+            // while this one still landed on the canonical URL.
+            final resolved = _resolveCanonical(
+                resp.realUri, cleanUrl, username, shortcode, 'desktop-ua');
+            username = resolved.username;
+            shortcode = resolved.shortcode;
+            if (resolved.canonicalUrl != null) {
+              canonicalUrl ??= resolved.canonicalUrl;
+              // Also worth trying for the bot-UA fallback below.
+              urlsToTry.add(resolved.canonicalUrl!);
+            }
+            break;
+          }
+        } catch (e) {
+          debugPrint('[Threads] Desktop UA failed ($tryUrl): $e');
+        }
       }
     }
 
@@ -459,6 +548,11 @@ class ThreadsDownloaderService {
           '(no re-fetch)');
     } else {
       for (final tryUrl in urlsToTry) {
+        if (isGated(tryUrl)) {
+          debugPrint('[Threads] Bot UA: skipping $tryUrl — already '
+              'confirmed invalid-post gate');
+          continue;
+        }
         try {
           final resp = await _botDio.get<String>(tryUrl);
           if (resp.statusCode == 200 && resp.data != null) {
@@ -466,6 +560,7 @@ class ThreadsDownloaderService {
               debugPrint('[Threads] Bot UA: invalid-post/login-gate '
                   'redirect ($tryUrl -> ${resp.realUri})');
               hitInvalidPostGate = true;
+              markGated(tryUrl);
               continue; // never accept the login gate — try the next variant
             }
             botHtml = resp.data!;
@@ -667,8 +762,8 @@ class ThreadsDownloaderService {
 
   /// True when [node] carries actual displayable media of its own —
   /// `carousel_media`, `video_versions`, or `image_versions2.candidates`,
-  /// all non-empty. Shared by [_findPostNode] (matching a KNOWN shortcode)
-  /// and [_findFirstMediaBearingCode] (searching for ANY post that has one).
+  /// all non-empty. Used by [_findPostNode] to confirm a code/id match is
+  /// the real post object and not a bare reference.
   bool _nodeHasMedia(Map node) {
     final carousel = node['carousel_media'];
     final video = node['video_versions'];
@@ -676,48 +771,6 @@ class ThreadsDownloaderService {
     return (carousel is List && carousel.isNotEmpty) ||
         (video is List && video.isNotEmpty) ||
         (images is List && images.isNotEmpty);
-  }
-
-  /// Step (b)-3 of authenticated short-link resolution ([_resolveViaWebView]):
-  /// finds the first `code` anywhere in the WebView-rendered page's data-sjs
-  /// payload that belongs to a node actually carrying media, when the
-  /// URL/canonical-tag resolution in that method both come up empty. This is
-  /// a genuine LAST-RESORT guess at WHICH post the page is about — but it
-  /// can't defeat the leak guard: [parseDataSjs] still re-verifies the
-  /// returned code against [_findPostNode]'s own exact code-match +
-  /// media-presence rule before ever returning an item.
-  String? _findAnyMediaBearingCode(String html) {
-    final blockRe = RegExp(
-      r'<script type="application/json"[^>]*data-sjs[^>]*>([\s\S]*?)</script>',
-    );
-    for (final m in blockRe.allMatches(html)) {
-      dynamic decoded;
-      try {
-        decoded = jsonDecode(m.group(1)!);
-      } catch (_) {
-        continue; // some data-sjs blocks are JS, not JSON — skip silently
-      }
-      final code = _findFirstMediaBearingCode(decoded);
-      if (code != null) return code;
-    }
-    return null;
-  }
-
-  String? _findFirstMediaBearingCode(dynamic node) {
-    if (node is Map) {
-      final code = node['code'];
-      if (code is String && _nodeHasMedia(node)) return code;
-      for (final v in node.values) {
-        final found = _findFirstMediaBearingCode(v);
-        if (found != null) return found;
-      }
-    } else if (node is List) {
-      for (final v in node) {
-        final found = _findFirstMediaBearingCode(v);
-        if (found != null) return found;
-      }
-    }
-    return null;
   }
 
   /// Extracts a canonical post URL from rendered HTML via
@@ -738,70 +791,93 @@ class ThreadsDownloaderService {
     return ogUrlTag?.group(1);
   }
 
-  /// Step (b) of authenticated short-link resolution: loads [url] in the
-  /// app's WebView — [webview_html_fetcher] shares the Android
-  /// CookieManager with the rest of the app, so this is logged in if the
-  /// user has ever signed into threads.com in-app (e.g. via Accounts →
-  /// Threads "Open", or the login flow). Tries, in order: (1) the WebView's
-  /// own final URL, (2) `<link rel="canonical">`/`og:url` in the rendered
-  /// HTML, (3) [_findAnyMediaBearingCode] as a last resort. Returns null
-  /// (never a guess beyond that) when none of those find anything, or when
-  /// no navigator context is available to push the WebView screen.
+  /// Step (b) of authenticated short-link resolution: loads [url] through
+  /// [renderedFetch] (a WebView that shares the Android CookieManager with
+  /// the rest of the app, so it's logged in if the user has ever signed
+  /// into threads.com in-app — see the [ThreadsRenderedFetch] doc comment).
+  /// Returns null (skips this step, logged) when [renderedFetch] is null —
+  /// this method never reaches for a navigator itself.
+  ///
+  /// SCOPING IS CRITICAL (field-verified 2026-09-07: a logged-in WebView
+  /// landing on the "invalid post" gate renders the user's own FEED, not an
+  /// error page — an earlier version of this method picked "the first
+  /// media-bearing post on the page" there, which could silently return a
+  /// completely unrelated post). A shortcode is accepted ONLY when a URL
+  /// that (a) is confirmed NOT the invalid-post gate and (b) matches
+  /// `/@user/post/<code>` or `/post/<code>` is found — first from the
+  /// WebView's own final URL, then (only because the final URL already
+  /// cleared the gate check) from `<link rel="canonical">`/`og:url` in the
+  /// rendered HTML. Guessing a post from page CONTENT (e.g. the first
+  /// `"code"` with media anywhere in the data-sjs payload) is never done —
+  /// if the final URL IS the gate, [onInvalidPostGate] is invoked and this
+  /// returns null immediately, without inspecting the page content at all.
   Future<({String html, String username, String? shortcode, String? canonicalUrl})?>
       _resolveViaWebView(
-          String url, String currentUsername, String? currentShortcode) async {
-    final context = rootNavigatorKey.currentContext;
-    if (context == null) {
-      debugPrint('[Threads] WebView short-link resolve: no context available');
+    String url,
+    String currentUsername,
+    String? currentShortcode, {
+    required ThreadsRenderedFetch? renderedFetch,
+    required void Function() onInvalidPostGate,
+  }) async {
+    if (renderedFetch == null) {
+      debugPrint('[Threads] WebView short-link resolve: no renderedFetch '
+          'callback supplied — skipping');
       return null;
     }
 
-    final result =
-        await webview_html_fetcher.fetchRenderedHtmlWithUrl(context, url);
+    final result = await renderedFetch(url);
     final html = result.html;
-
-    var resUsername = currentUsername;
-    var resShortcode = currentShortcode;
-    String? resCanonicalUrl;
-
     final finalUrl = result.finalUrl;
     final finalUri = finalUrl != null ? Uri.tryParse(finalUrl) : null;
-    if (finalUri != null && !_isInvalidPostResponse(finalUri)) {
+
+    if (finalUri == null) {
+      debugPrint('[Threads] webview: could not determine the final URL — '
+          'treating as unresolved (never guessing from page content)');
+      return null;
+    }
+
+    if (_isInvalidPostResponse(finalUri)) {
+      debugPrint('[Threads] webview landed on '
+          '${finalUri.path.isEmpty ? '/' : finalUri.path} — not a post page '
+          '(invalid-post/login gate)');
+      onInvalidPostGate();
+      return null;
+    }
+
+    // (a) the WebView's own final URL.
+    if (_extractShortcode(finalUri.toString()) != null) {
       final resolved = _resolveCanonical(
-          finalUri, url, resUsername, resShortcode, 'webview');
-      resUsername = resolved.username;
-      resShortcode = resolved.shortcode;
-      resCanonicalUrl = resolved.canonicalUrl;
+          finalUri, url, currentUsername, currentShortcode, 'webview');
+      return (
+        html: html,
+        username: resolved.username,
+        shortcode: resolved.shortcode,
+        canonicalUrl: resolved.canonicalUrl,
+      );
     }
 
-    if (resShortcode == null) {
-      final canonicalFromHtml = _extractCanonicalFromHtml(html);
-      final uri =
-          canonicalFromHtml != null ? Uri.tryParse(canonicalFromHtml) : null;
-      if (uri != null && !_isInvalidPostResponse(uri)) {
-        final resolved =
-            _resolveCanonical(uri, url, resUsername, resShortcode, 'webview');
-        resUsername = resolved.username;
-        resShortcode = resolved.shortcode;
-        resCanonicalUrl ??= resolved.canonicalUrl;
-      }
+    // (b) <link rel="canonical">/og:url in the rendered HTML — only trusted
+    // because the final URL above already confirmed this ISN'T the
+    // invalid-post gate.
+    final canonicalFromHtml = _extractCanonicalFromHtml(html);
+    final canonicalUri =
+        canonicalFromHtml != null ? Uri.tryParse(canonicalFromHtml) : null;
+    if (canonicalUri != null &&
+        !_isInvalidPostResponse(canonicalUri) &&
+        _extractShortcode(canonicalUri.toString()) != null) {
+      final resolved = _resolveCanonical(
+          canonicalUri, url, currentUsername, currentShortcode, 'webview');
+      return (
+        html: html,
+        username: resolved.username,
+        shortcode: resolved.shortcode,
+        canonicalUrl: resolved.canonicalUrl,
+      );
     }
 
-    if (resShortcode == null) {
-      final code = _findAnyMediaBearingCode(html);
-      if (code != null) {
-        resShortcode = code;
-        debugPrint(
-            '[Threads] Resolved short link via webview -> code=$code (data-sjs node)');
-      }
-    }
-
-    return (
-      html: html,
-      username: resUsername,
-      shortcode: resShortcode,
-      canonicalUrl: resCanonicalUrl,
-    );
+    debugPrint('[Threads] webview landed on '
+        '${finalUri.path.isEmpty ? '/' : finalUri.path} — not a post page');
+    return null;
   }
 
   // ── A1: Parse __NEXT_DATA__ (Next.js SSR) ────────────────────────────────

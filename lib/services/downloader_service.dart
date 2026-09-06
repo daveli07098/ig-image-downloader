@@ -107,6 +107,13 @@ class DownloaderService {
   Future<FetchResult> fetchItems(
     String url, {
     Future<String> Function(String url)? renderedHtmlFallback,
+    // WebView-backed fetch used ONLY by ThreadsDownloaderService to resolve
+    // a `/share/`/`/t/` short link that a session couldn't resolve any other
+    // way — see ThreadsRenderedFetch's doc comment. Kept separate from
+    // [renderedHtmlFallback] above (rather than reusing it) because Threads
+    // needs the WebView's final URL, not just its HTML, to identify which
+    // post the page is actually about.
+    ThreadsRenderedFetch? threadsRenderedFetch,
   }) async {
     if (XDownloaderService.isXUrl(url)) {
       return FetchResult(items: await XDownloaderService().fetchItems(url));
@@ -119,7 +126,9 @@ class DownloaderService {
       final threadsSessionId = await SessionService.getThreadsSessionId();
       return FetchResult(
           items: await ThreadsDownloaderService().fetchItems(url,
-              igSessionId: igSessionId, threadsSessionId: threadsSessionId));
+              igSessionId: igSessionId,
+              threadsSessionId: threadsSessionId,
+              renderedFetch: threadsRenderedFetch));
     }
     if (FacebookDownloaderService.isFacebookUrl(url)) {
       final fbCookies =

@@ -18,13 +18,21 @@ import 'webview_user_agent.dart';
 /// visible screen is surfaced so the user can complete it manually (e.g. tap
 /// an "I am human" checkbox); the WebView keeps polling and the future
 /// completes once the DOM clears. The user can cancel at any time via the
-/// close button, which throws.
+/// close button, which throws — as does a main-frame load failure (DNS,
+/// offline) or the [hardDeadline] elapsing, so this can never hang forever.
 Future<String> fetchRenderedHtml(
   BuildContext context,
   String url, {
   Duration timeout = const Duration(seconds: 20),
+  Duration hardDeadline = const Duration(seconds: 45),
 }) async {
-  final result = await _pushWebViewFetcher(context, url, timeout: timeout);
+  final result = await _pushWebViewFetcher(
+    context,
+    url,
+    timeout: timeout,
+    hardDeadline: hardDeadline,
+    trustWeakSignals: true,
+  );
   return result.html;
 }
 
@@ -36,23 +44,43 @@ Future<String> fetchRenderedHtml(
 /// page (e.g. it needs the logged-in cookie jar this WebView shares with the
 /// rest of the app, via the Android CookieManager). [fetchRenderedHtml]
 /// keeps its original signature/behavior unchanged for its existing caller.
+///
+/// [trustWeakSignals] defaults to `true` (matching [fetchRenderedHtml]'s
+/// behavior) but ThreadsDownloaderService passes `false` — see the
+/// `trustWeakSignals` doc comment on `_WebViewHtmlFetcherScreen._poll` for
+/// why the two callers need different values.
 Future<({String html, String? finalUrl})> fetchRenderedHtmlWithUrl(
   BuildContext context,
   String url, {
   Duration timeout = const Duration(seconds: 20),
+  Duration hardDeadline = const Duration(seconds: 45),
+  bool trustWeakSignals = true,
 }) {
-  return _pushWebViewFetcher(context, url, timeout: timeout);
+  return _pushWebViewFetcher(
+    context,
+    url,
+    timeout: timeout,
+    hardDeadline: hardDeadline,
+    trustWeakSignals: trustWeakSignals,
+  );
 }
 
 Future<({String html, String? finalUrl})> _pushWebViewFetcher(
   BuildContext context,
   String url, {
   required Duration timeout,
+  required Duration hardDeadline,
+  required bool trustWeakSignals,
 }) async {
   final result = await Navigator.of(context, rootNavigator: true)
       .push<({String html, String? finalUrl})>(
     MaterialPageRoute(
-      builder: (_) => _WebViewHtmlFetcherScreen(url: url, timeout: timeout),
+      builder: (_) => _WebViewHtmlFetcherScreen(
+        url: url,
+        timeout: timeout,
+        hardDeadline: hardDeadline,
+        trustWeakSignals: trustWeakSignals,
+      ),
       fullscreenDialog: true,
     ),
   );
@@ -79,10 +107,17 @@ String _decodeJsResult(Object result) {
 }
 
 class _WebViewHtmlFetcherScreen extends StatefulWidget {
-  const _WebViewHtmlFetcherScreen({required this.url, required this.timeout});
+  const _WebViewHtmlFetcherScreen({
+    required this.url,
+    required this.timeout,
+    required this.hardDeadline,
+    required this.trustWeakSignals,
+  });
 
   final String url;
   final Duration timeout;
+  final Duration hardDeadline;
+  final bool trustWeakSignals;
 
   @override
   State<_WebViewHtmlFetcherScreen> createState() =>
@@ -93,6 +128,7 @@ class _WebViewHtmlFetcherScreenState
     extends State<_WebViewHtmlFetcherScreen> {
   late final WebViewController _controller;
   Timer? _pollTimer;
+  Timer? _deadlineTimer;
   DateTime? _pageLoadedAt;
   bool _revealed = false; // becomes true once the timeout is hit
   bool _busy = false; // guards against overlapping polls
@@ -101,6 +137,12 @@ class _WebViewHtmlFetcherScreenState
   @override
   void initState() {
     super.initState();
+    // Hard ceiling on the whole fetch — a page that never fires
+    // onPageFinished (DNS failure, offline, a server that just hangs) would
+    // otherwise poll forever with only the [timeout]-triggered "reveal" as
+    // the sole user-facing signal, leaving the future unresolved until the
+    // user manually taps Close. This guarantees the future always settles.
+    _deadlineTimer = Timer(widget.hardDeadline, _onHardDeadline);
     _controller = WebViewController()
       ..setJavaScriptMode(JavaScriptMode.unrestricted)
       // Same real Chrome Mobile UA as login_screen.dart / in_app_browser_screen.dart
@@ -125,8 +167,41 @@ class _WebViewHtmlFetcherScreenState
           _pageLoadedAt = DateTime.now();
           _startPolling();
         },
+        onWebResourceError: (error) {
+          if (!mounted) return;
+          // Only bail on a MAIN-FRAME error — a failed sub-resource (an ad,
+          // a tracking pixel, a font) is routine and must not abort a fetch
+          // that would otherwise succeed. `isForMainFrame` is nullable on
+          // some platforms; treat "unknown" as main-frame too rather than
+          // silently ignoring a real load failure.
+          if (error.isForMainFrame == false) return;
+          debugPrint('[WebViewHtmlFetcher] main-frame load error: '
+              '${error.errorType} ${error.description} — cancelling');
+          _cancel();
+        },
       ))
       ..loadRequest(Uri.parse(widget.url));
+  }
+
+  void _onHardDeadline() {
+    if (!mounted) return;
+    debugPrint('[WebViewHtmlFetcher] hard deadline (${widget.hardDeadline}) '
+        'reached — cancelling');
+    _cancel();
+  }
+
+  /// Cancels the fetch (pops `null`, which [_pushWebViewFetcher] turns into
+  /// a thrown Exception for the caller) — used by the Close button, a
+  /// main-frame load error, and the hard deadline. Always cancels BOTH
+  /// timers first: a Timer leak was fixed here before (the guard was
+  /// missing on one of these exit paths), so every exit path must cancel
+  /// every Timer, not just the one most obviously related to that path.
+  void _cancel() {
+    if (_resolving || !mounted) return;
+    _resolving = true;
+    _pollTimer?.cancel();
+    _deadlineTimer?.cancel();
+    Navigator.of(context).pop();
   }
 
   void _startPolling() {
@@ -149,10 +224,16 @@ class _WebViewHtmlFetcherScreenState
       if (!mounted) return;
       final html = _decodeJsResult(result);
 
-      // This screen only ever runs once a challenge is already suspected (see
-      // generic_article_downloader_service.dart), so WEAK signals are trusted
-      // here too — pass wasForbidden: true.
-      if (!looksLikeJsChallenge(html, wasForbidden: true)) {
+      // [trustWeakSignals] controls whether AMBIGUOUS ("weak") challenge
+      // signals are trusted as a real challenge. True for the original
+      // Tumblr/generic-article caller (fetchRenderedHtml), which only ever
+      // pushes this screen once a challenge is already suspected (see
+      // generic_article_downloader_service.dart) — weak signals are safe to
+      // trust there. ThreadsDownloaderService passes false: it uses this
+      // screen as a general logged-in page fetch with no prior challenge
+      // suspicion, so trusting weak signals there would misidentify an
+      // ordinary rendered page as still-challenged and never finish.
+      if (!looksLikeJsChallenge(html, wasForbidden: widget.trustWeakSignals)) {
         // Read the WebView's current URL BEFORE popping — needed by callers
         // that resolve a redirect/short-link via the rendered page (see
         // fetchRenderedHtmlWithUrl); best-effort only, null on failure so a
@@ -170,7 +251,8 @@ class _WebViewHtmlFetcherScreenState
 
       // Still challenged — reveal the WebView once the timeout elapses so the
       // user can clear it manually (e.g. tap "I am human"). Polling continues
-      // indefinitely after that; there's no second timeout.
+      // indefinitely after that; there's no second timeout (the hard deadline
+      // above still applies and will eventually cancel the whole fetch).
       final loadedAt = _pageLoadedAt;
       if (!_revealed &&
           loadedAt != null &&
@@ -188,12 +270,14 @@ class _WebViewHtmlFetcherScreenState
     if (_resolving || !mounted) return;
     _resolving = true;
     _pollTimer?.cancel();
+    _deadlineTimer?.cancel();
     Navigator.of(context).pop((html: html, finalUrl: finalUrl));
   }
 
   @override
   void dispose() {
     _pollTimer?.cancel();
+    _deadlineTimer?.cancel();
     super.dispose();
   }
 
@@ -205,7 +289,7 @@ class _WebViewHtmlFetcherScreenState
         leading: IconButton(
           icon: const Icon(Icons.close),
           tooltip: 'Cancel',
-          onPressed: () => Navigator.of(context).pop(), // pop(null) → cancel
+          onPressed: _cancel, // pop(null) → cancel
         ),
       ),
       body: Stack(

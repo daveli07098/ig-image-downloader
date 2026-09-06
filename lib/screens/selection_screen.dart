@@ -46,6 +46,31 @@ final _mediaItemsProvider =
       }
       return webview_html_fetcher.fetchRenderedHtml(context, u);
     },
+    // Same cancellation guard as renderedHtmlFallback above, for
+    // ThreadsDownloaderService's authenticated `/share/`/`/t/` short-link
+    // resolution — an abandoned fetch must never pop a full-screen WebView
+    // over whatever screen the user is on next. trustWeakSignals: false
+    // because this screen has no prior challenge suspicion here (it's a
+    // general logged-in page fetch, not a re-fetch after a detected
+    // anti-bot block) — see webview_html_fetcher's doc comment.
+    threadsRenderedFetch: (u) {
+      if (cancelled) {
+        throw Exception(
+          'Cancelled — the request was abandoned before verification.',
+        );
+      }
+      final context = rootNavigatorKey.currentContext;
+      if (context == null) {
+        throw Exception(
+          'Cannot run browser verification — the app is no longer on screen.',
+        );
+      }
+      return webview_html_fetcher.fetchRenderedHtmlWithUrl(
+        context,
+        u,
+        trustWeakSignals: false,
+      );
+    },
   );
 });
 
