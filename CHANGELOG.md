@@ -1,5 +1,34 @@
 # Changelog
 
+## [2026-09-07] — Session: Threads + Tumblr video/image extraction
+
+### Added
+- feat(tumblr): parse the `___INITIAL_STATE___` NPF JSON as the primary Tumblr path — community-labelled posts return an empty shell (no `<img>`, no `og:image`) that DOM scraping can never see; images pick the `hasOriginalDimensions` variant, videos use `media.url` with the poster as thumbnail, reblogs fall back to `trail[].content` ([51c889d])
+- feat(generic): `og:video` and `<video>/<source>` extraction in the generic article scraper, which had no video handling at all ([51c889d])
+- feat(threads): parse `data-sjs` post JSON fetched with a Googlebot UA — the only UA Meta server-renders it for; scoped to the node whose `code` matches the shortcode ([4e8e56c])
+- feat(threads): resolve `/share/<code>` and `/t/<code>` links via `realUri`; login-gated posts resolve through the threads.com cookie or the in-app WebView (shared CookieManager) before the authenticated API ([4e8e56c])
+- feat(webview): `fetchRenderedHtmlWithUrl` returns the WebView's final URL alongside the HTML ([4e8e56c])
+- test: fixtures + unit tests for Tumblr NPF/DOM parsing, Threads data-sjs scoping, junk filter, and extension/MIME derivation ([51c889d], [4e8e56c])
+
+### Fixed
+- fix(tumblr): video posts produced only the poster frame as a "photo" ([51c889d])
+- fix(tumblr): real blog name instead of `tumblr_com`; dedupe key strips the `/sWxH[_fN]/` size segment so a poster and its video, or one photo at two sizes, no longer save twice ([51c889d])
+- fix(tumblr): plain fetch uses `kRealChromeMobileUA` — the hashcash 403 was UA-gated (desktop 403, mobile 200 from the same IP); WebView solver kept as fallback ([51c889d])
+- fix(download): saved files keep their real extension/MIME (`.mov/.gif/.png/.webp`) instead of forced `.jpg`/`.mp4`; `.pnj` maps to `.jpg` ([51c889d])
+- fix(junk-filter): `alt`-text matching narrowed to avatar/gravatar/favicon so art posts captioned "pixel"/"sprite"/"logo" are kept ([51c889d])
+- fix(threads): `/share/` video posts came back as the `og:image` poster with a play badge — `__NEXT_DATA__`, `t50.2886-16`, `t51.2885-15` and `og:video` all verified dead ([4e8e56c])
+- fix(threads): the login page's `rsrc.php` logo was downloaded as "the image" for login-gated posts; `error=` redirects and `static.cdninstagram.com` OG images are never items, with a clear "not available without logging in" error ([4e8e56c])
+- fix(threads): the `i.instagram.com` fallback was outside RateGuard — same endpoint the Instagram path protects, called unguarded up to 3× per fetch ([4e8e56c])
+- fix(threads): quality pickers replace `.first`; mixed carousels keep their photos; `video_versions` presence classifies video when `media_type` is absent ([4e8e56c])
+- fix(queue): download-stage failures are now logged, not only shown on a deletable job tile ([4e8e56c])
+
+### Changed
+- Filenames/ledger keys: `tumblr_com_*` → `<blog>_*`, `threads_*` → `<handle>_*`. Previously downloaded Tumblr/Threads posts appear as new once.
+
+### Known
+- A normal Threads download now makes zero authenticated calls; the authenticated API runs only for login-gated posts, under RateGuard.
+- `[Home] FB username resolve: 400` on every cold start is a speculative `facebook.com/me` call that never persists — unrelated to the shared URL, unfixed.
+
 ## [2026-08-18] — Session: Tumblr support, avatar filtering, dedup & IG flag recovery
 
 ### Added
