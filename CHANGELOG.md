@@ -1,5 +1,21 @@
 # Changelog
 
+## [2026-09-14] — Session: Facebook /posts/ photo albums
+
+### Fixed
+- fix(facebook): `/posts/<id>/` photo albums returned an unrelated Reel plus one thumbnail — Facebook serves `og:type=video.other` for photo posts, which sent them down the video path where an unscoped `progressive_url` regex matched a Reels-rail video on the logged-in page; mbasic (the old photo enumerator) is login-walled even with the cookie ([2849a0e])
+
+### Added
+- feat(facebook): scoped story-JSON parser — decodes the `data-sjs` block containing `"post_id":"<id>"`, takes `all_subattachments.nodes[].media.viewer_image` (full size) with `image` and the anonymous `lookaside.fbsbx.com` crawler URL as fallbacks; video classified only from the post's own attachments; username from `actors[0].url`; date from `creation_time` ([2849a0e])
+- test: hand-built Facebook story fixture with synthetic decoys (no session page content) ([2849a0e])
+
+### Changed
+- Facebook filenames/ledger keys: `facebook_*` → `<page>_*` (e.g. `HKACGer_*`). Previously downloaded Facebook posts appear as new once.
+
+### Known
+- Facebook still has no RateGuard; `[Home] FB username resolve: 400` on cold start is unchanged.
+- No real `/posts/` VIDEO fixture exists yet — that branch is covered by a synthetic test only.
+
 ## [2026-09-07] — Session: Threads + Tumblr video/image extraction
 
 ### Added
