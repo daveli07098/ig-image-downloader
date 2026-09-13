@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:math';
 
 import 'package:dio/dio.dart';
@@ -90,6 +91,60 @@ class FacebookDownloaderService {
     return 'facebook';
   }
 
+  /// Extracts a numeric post ID from a `/posts/<id>/`, `/permalink/<id>/`, or
+  /// `permalink.php?story_fbid=<id>` URL — the URL shapes whose story JSON is
+  /// scoped and parsed by [_parseStoryFromDataSjs]. Returns null for every
+  /// other shape (reel/videos/share/watch), which keep the legacy og:type +
+  /// regex pipeline below untouched.
+  static String? _extractPostIdForStory(String url) {
+    final postsMatch = RegExp(r'/posts/(\d+)').firstMatch(url);
+    if (postsMatch != null) return postsMatch.group(1);
+    final permalinkMatch = RegExp(r'/permalink/(\d+)').firstMatch(url);
+    if (permalinkMatch != null) return permalinkMatch.group(1);
+    final storyFbid = Uri.tryParse(url)?.queryParameters['story_fbid'];
+    if (storyFbid != null && RegExp(r'^\d+$').hasMatch(storyFbid)) {
+      return storyFbid;
+    }
+    return null;
+  }
+
+  /// Path segments that are never a usable display name — URL-shape keywords
+  /// (`posts`, `photo`, …) AND, since 2026-09-14, the two profile-URL shapes
+  /// that otherwise leak a wrong "username": `facebook.com/people/<Name>/
+  /// <numericId>/` (blindly taking the LAST segment used to yield the
+  /// numeric id, not `<Name>`) and `facebook.com/profile.php?id=…` (yields
+  /// the literal string `profile.php`, the only path segment it has).
+  static const _usernameUrlSkipSegments = {
+    'posts', 'permalink', 'photo', 'photos', 'videos', 'video',
+    'share', 'r', 'reel', 'reels', 'watch', 'www.facebook.com',
+    'profile.php', 'people',
+  };
+
+  /// First non-numeric, non-keyword path segment of [url] — shared by the
+  /// `og:url` fallback and, since 2026-09-14, [_usernameFromStory]'s
+  /// `actors[0].url` handling (previously took the LAST segment
+  /// unconditionally, which broke on `/people/<Name>/<numericId>/` and
+  /// `/profile.php?id=…` shapes — see [_usernameUrlSkipSegments]).
+  static String? _firstUsableUrlSegment(String? url) {
+    if (url == null) return null;
+    final uri = Uri.tryParse(url);
+    if (uri == null) return null;
+    for (final seg in uri.pathSegments) {
+      if (seg.isEmpty) continue;
+      if (RegExp(r'^\d+$').hasMatch(seg)) continue;
+      if (_usernameUrlSkipSegments.contains(seg.toLowerCase())) continue;
+      return seg;
+    }
+    return null;
+  }
+
+  /// Fallback username for a story-JSON post: the non-numeric, non-keyword
+  /// path segment of `og:url` (e.g. `HKACGer` from
+  /// `facebook.com/HKACGer/posts/<id>/`). Used only when the post's own
+  /// `actors[0]` (url/name) is unavailable.
+  static String? _nonNumericOgUrlSegment(String? ogUrl) =>
+      _firstUsableUrlSegment(ogUrl);
+
   // ── Fetch media items ────────────────────────────────────────────────────
 
   /// [fbCookies] — the full Facebook cookie string captured from the WebView
@@ -149,11 +204,73 @@ class FacebookDownloaderService {
     final allImages = List<String>.from(ogImages);
     _extractCarouselImagesFromJson(html, allImages);
 
+    // ── /posts/ (and /permalink/, story_fbid) story-JSON extraction ────────
+    // Verified WRONG on 2026-09-14: og:type identifies videos for reels but
+    // NOT for /posts/ URLs — Facebook serves og:type=video.other to the bot
+    // UA for plain photo albums, and the page's unscoped video regex then
+    // matches an unrelated Reels-rail video ~1 MB away in the same page,
+    // hiding the whole photo album behind a wrong video. For these URL
+    // shapes the only reliable source of truth is the post's own story JSON
+    // (`post_id` + `attachments`), which lives in the authenticated desktop
+    // page — bot-UA HTML has just OG meta tags, and mbasic is login-walled
+    // even with a valid cookie as of 2026-09-14, so it can no longer
+    // enumerate album photos either.
+    final postId = _extractPostIdForStory(finalUrl) ??
+        _extractPostIdForStory(url) ??
+        _extractPostIdForStory(cleanUrl);
+    _StoryData? story;
+    if (postId != null && fbCookies != null) {
+      try {
+        // Small random delay before the authenticated fetch — breaks the
+        // pattern of back-to-back requests with millisecond precision, a
+        // reliable automation-detection signal.
+        await Future.delayed(
+            Duration(milliseconds: 500 + Random().nextInt(1500)));
+        final resolvedUrl =
+            finalUrl.isNotEmpty ? finalUrl.split('?').first : cleanUrl;
+        final storyAuthHtml =
+            await _fetchAuthenticatedHtml(resolvedUrl, fbCookies);
+        if (storyAuthHtml != null) {
+          story = _parseStoryFromDataSjs(storyAuthHtml, postId);
+        }
+      } catch (e) {
+        debugPrint('[FB] story parse fetch failed: $e');
+      }
+    }
+
+    if (story != null) {
+      final storyItems = _buildItemsFromStory(story, ogUrl, allImages);
+      if (storyItems.isNotEmpty) {
+        debugPrint('[FB] story parse: ${story.photos.length} photos, '
+            '${story.video != null ? 1 : 0} videos '
+            '(page=${storyItems.first.username})');
+        debugPrint('[FB] SERVED BY: story-json (post=$postId)');
+        return storyItems;
+      }
+      debugPrint(
+          '[FB] story parse yielded no usable items — falling back to legacy pipeline');
+    }
+
     // Detect video pages by og:type OR URL patterns. Facebook reel URLs often
     // omit og:type=video when served to the facebookexternalhit bot UA.
-    final isVideoPage = (ogType != null && ogType!.startsWith('video')) ||
-        finalUrl.contains('/reel/') ||
-        cleanUrl.contains('/share/r/');
+    // EXCEPTION verified wrong on 2026-09-14: for /posts/ (and /permalink/,
+    // story_fbid) URLs og:type must never be trusted when the story JSON
+    // actually ran and resolved this post (see above) — that JSON is the
+    // post's own attachments and is authoritative. The switch is on
+    // `story != null` (the parse ACTUALLY FOUND this post), not merely
+    // `postId != null` — corrected 2026-09-14 after device testing showed a
+    // genuinely public video shared as `/posts/<id>/` with NO session (so
+    // the story JSON never ran) was silently never classified as a video,
+    // losing the bot-UA-only `/video/embed`+plugin probes that used to find
+    // it. When the story parse didn't run (no session) or ran but couldn't
+    // find this post's node at all, fall back to the legacy og:type/URL
+    // logic — the photo-post protection is unaffected: when the story DID
+    // run and found only photos, `story.video == null` still forces false.
+    final isVideoPage = story != null
+        ? story.video != null
+        : (ogType != null && ogType!.startsWith('video')) ||
+            finalUrl.contains('/reel/') ||
+            cleanUrl.contains('/share/r/');
 
     // ── Real video URL extraction ──────────────────────────────────────────
     // og:video from Facebook is typically an embed iframe URL, not an MP4.
@@ -180,7 +297,16 @@ class FacebookDownloaderService {
     // For photo posts the facebookexternalhit response can include og:video meta
     // tags (auto-generated slideshows) that _extractVideoUrlFromJson would match,
     // producing a false realVideoUrl that hides all the actual post photos.
-    if (isVideoPage) {
+    //
+    // `postId == null` guard added 2026-09-14 (code review flagged this site
+    // was missed alongside the other two unscoped-regex call sites already
+    // guarded below): this is an unscoped, page-wide regex — never safe to
+    // run for /posts/ URLs regardless of how isVideoPage ended up true (og:type
+    // fallback OR a story-confirmed Video attachment whose URL
+    // [_findVideoUrlInNode] simply couldn't resolve). The embed/plugin probes
+    // just below are the correct /posts/-safe fallback instead — they hit
+    // small, video-id-scoped endpoints, not this page's full HTML.
+    if (isVideoPage && postId == null) {
       realVideoUrl ??= _extractVideoUrlFromJson(html);
     }
 
@@ -290,7 +416,15 @@ class FacebookDownloaderService {
     // NOT used for photo pages — desktop auth HTML is the full Facebook feed SPA
     // (ads, recommendations, sidebar); any video URL found there would be a false
     // positive from an unrelated post, not the shared photo album.
-    if (fbCookies != null && isVideoPage && realVideoUrl == null) {
+    //
+    // `postId == null` guard added 2026-09-14: this is the exact unscoped
+    // regex that caused the original bug for /posts/ URLs (matched an
+    // unrelated Reels-rail video ~1 MB away from the actual post in the same
+    // SPA HTML). For /posts/ URLs, [_parseStoryFromDataSjs] above already
+    // tried the scoped, post_id-anchored equivalent — if that came up empty,
+    // falling back to this unscoped search would silently reintroduce the
+    // bug rather than genuinely finding this post's video.
+    if (fbCookies != null && isVideoPage && realVideoUrl == null && postId == null) {
       debugPrint('[FB] Auth fetch for video (no URL found yet)');
       try {
         // Small random delay before authenticated fetch — breaks the pattern of
@@ -348,6 +482,16 @@ class FacebookDownloaderService {
     // Auth cookies are passed when available (so friends-only posts work too)
     // but are NOT required — public posts are accessible without them.
     //
+    // VERIFIED WRONG on 2026-09-14 for `/posts/<id>/` pages specifically:
+    // mbasic now redirects even an authenticated (valid-cookie) request to
+    // `m.facebook.com/login/?next=…` for these URLs — it can no longer
+    // enumerate a `/posts/` album's photos at all, cookie or not. This block
+    // is left in place (still correct for share/photo/set-style URLs where
+    // mbasic does work, and its own host-redirect check already bails out
+    // cleanly on the login gate) but for `/posts/` pages the story-JSON path
+    // above is now the real source of truth — this is just the safety net
+    // when that path is unavailable (no session) or came up empty.
+    //
     // _mbasicUA (iOS Safari): mbasic.facebook.com serves basic HTML to mobile
     // UAs. App redirects (fb:// / intent://) only happen on www.facebook.com;
     // mbasic IS the app-free web version and never redirects to the native app.
@@ -361,6 +505,11 @@ class FacebookDownloaderService {
     // no real video URL was found: Facebook mislabels many multi-photo albums
     // as og:type=video.other, which sets isVideoPage but yields no MP4 — those
     // are actually photo albums and must go through the carousel extractor.
+    // (This og:type mislabeling applies whenever the story JSON DIDN'T run
+    // or didn't find this post — no session, or the parse came up empty. For
+    // `/posts/` URLs where the story JSON DID find the post, isVideoPage
+    // above is derived from the post's own attachments instead, never
+    // og:type — corrected 2026-09-14.)
     final treatAsPhotoPage = !isVideoPage || realVideoUrl == null;
     if (treatAsPhotoPage) {
       try {
@@ -613,7 +762,11 @@ class FacebookDownloaderService {
         final authResp = await authDio.get<String>(resolvedUrl);
         if (authResp.statusCode == 200 && authResp.data != null) {
           final authHtml = authResp.data!;
-          final authVideoUrl = _extractVideoUrlFromJson(authHtml);
+          // postId == null guard: same reason as the earlier auth-fetch-for-
+          // video block — an unscoped regex over the full SPA HTML must never
+          // run for /posts/ URLs (that's the exact 2026-09-14 bug mechanism).
+          final authVideoUrl =
+              postId == null ? _extractVideoUrlFromJson(authHtml) : null;
           final authImages = <String>[];
           _extractCarouselImagesFromJson(authHtml, authImages);
 
@@ -656,6 +809,370 @@ class FacebookDownloaderService {
       );
     }
     return items;
+  }
+
+  // ── Story-JSON parsing (/posts/, /permalink/, story_fbid URLs) ──────────
+  //
+  // Field-verified 2026-09-14 against two real authenticated post-page dumps:
+  // the logged-in `www.facebook.com` desktop page embeds the full post JSON
+  // in `<script type="application/json" data-sjs>` blocks (204 in one dump),
+  // ALL valid JSON. Exactly one node per post carries `post_id == <id>` AND a
+  // non-empty `attachments` list (it can appear twice — `result/data/node_v2`
+  // and its nested `comet_sections/content/story` — with identical data; both
+  // are walked and the first to actually yield media wins). The same page
+  // routinely also contains OTHER posts' story data (news-feed rail) and
+  // unrelated videos (Reels rail) — scoping to the exact post_id is mandatory,
+  // never "the first attachments/all_subattachments/progressive_url on the
+  // page".
+
+  /// Fetches [url] with the authenticated desktop Chrome UA + [cookies] and
+  /// returns the response body, or null on any non-200/failure. Shared by the
+  /// story-JSON fetch above — desktop UA is required (not mobile) because
+  /// Facebook 302s mobile UAs on authenticated requests to `intent://`/`fb://`
+  /// deep links, which Dio cannot follow.
+  Future<String?> _fetchAuthenticatedHtml(String url, String cookies) async {
+    final authDio = Dio(BaseOptions(
+      connectTimeout: const Duration(seconds: 15),
+      receiveTimeout: const Duration(seconds: 30),
+      followRedirects: true,
+      maxRedirects: 8,
+      headers: {
+        'User-Agent': _authUA,
+        'Cookie': cookies,
+        'sec-fetch-dest': 'document',
+        'sec-fetch-mode': 'navigate',
+        'sec-fetch-site': 'none',
+        'sec-fetch-user': '?1',
+        'sec-ch-ua':
+            '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'Accept':
+            'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Upgrade-Insecure-Requests': '1',
+      },
+    ));
+    final resp = await authDio.get<String>(url);
+    if (resp.statusCode == 200 && resp.data != null) return resp.data;
+    return null;
+  }
+
+  /// Parses [html] for the story JSON of [postId]. Pre-filters `data-sjs`
+  /// blocks with a cheap `contains()` check on the raw text BEFORE
+  /// `jsonDecode` — a real authenticated page is 4+ MB with 200+ such blocks,
+  /// and decoding all of them on a phone is wasteful; field-verified only the
+  /// ONE block actually containing this post decodes to anything useful.
+  /// Returns null when no block yields a node with usable media (never a
+  /// guess from a structurally-similar-but-wrong node).
+  ///
+  /// Exercised indirectly by the unit test (via the public
+  /// [parseStoryForTesting]) against `test/fixtures/facebook_post_story.html`.
+  _StoryData? _parseStoryFromDataSjs(String html, String postId) {
+    final needle = '"post_id":"$postId"';
+    final scriptRe = RegExp(
+      r'<script type="application/json"[^>]*data-sjs[^>]*>([\s\S]*?)</script>',
+      caseSensitive: false,
+    );
+    for (final m in scriptRe.allMatches(html)) {
+      final raw = m.group(1);
+      if (raw == null || !raw.contains(needle)) continue;
+      dynamic data;
+      try {
+        data = jsonDecode(raw);
+      } catch (e) {
+        debugPrint(
+            '[FB] story parse: data-sjs block matched post_id but failed to decode: $e');
+        continue;
+      }
+      for (final node in _findStoryNodes(data, postId)) {
+        final result = _storyDataFromNode(node, html);
+        if (result != null) return result;
+      }
+    }
+    return null;
+  }
+
+  /// Recursively walks a decoded data-sjs JSON tree yielding every Map whose
+  /// `post_id` equals [postId] AND carries a non-empty `attachments` list —
+  /// a bare reference (e.g. inside a permalink string's parent object) that
+  /// merely echoes the post_id without attachments is never a candidate.
+  Iterable<Map<String, dynamic>> _findStoryNodes(
+      dynamic node, String postId) sync* {
+    if (node is Map) {
+      if (node['post_id'] == postId) {
+        final atts = node['attachments'];
+        if (atts is List && atts.isNotEmpty) {
+          yield node.cast<String, dynamic>();
+        }
+      }
+      for (final v in node.values) {
+        yield* _findStoryNodes(v, postId);
+      }
+    } else if (node is List) {
+      for (final v in node) {
+        yield* _findStoryNodes(v, postId);
+      }
+    }
+  }
+
+  /// Builds [_StoryData] (photos, video, actor, creation_time) from a single
+  /// story node's `attachments`. Handles both shapes field-verified 2026-09-14:
+  ///   - album: `attachments[].styles.attachment.all_subattachments.nodes[].media`
+  ///   - single photo/video: `attachments[].media` and/or
+  ///     `attachments[].styles.attachment.media` (no fixture for this shape —
+  ///     handled defensively).
+  /// Returns null when nothing usable was found (photos empty AND no video),
+  /// so [_parseStoryFromDataSjs] tries the next candidate node instead of
+  /// returning an empty success.
+  _StoryData? _storyDataFromNode(Map<String, dynamic> node, String rawHtml) {
+    final photos = <_StoryPhoto>[];
+    final seenFbids = <String>{};
+    _StoryVideo? video;
+
+    void merge(_ConsumedMedia? r) {
+      if (r == null) return;
+      if (r.photo != null) photos.add(r.photo!);
+      video ??= r.video;
+    }
+
+    final actors = node['actors'];
+    String? actorUrl, actorName;
+    if (actors is List && actors.isNotEmpty && actors.first is Map) {
+      final actor = actors.first as Map;
+      actorUrl = actor['url'] as String?;
+      actorName = actor['name'] as String?;
+    }
+    final creationTime = node['creation_time'];
+
+    final attachments = node['attachments'];
+    if (attachments is List) {
+      for (final attRaw in attachments) {
+        if (attRaw is! Map) continue;
+
+        // Album case FIRST: `all_subattachments.nodes[].media` carries the
+        // real per-photo data (viewer_image/image); the top-level
+        // `attachments[].media` on an album is just a bare
+        // `{__typename, id}` reference to photo 1 with NO image data at all
+        // (field-verified 2026-09-14) — consuming that first would win the
+        // fbid-dedup race and silently downgrade photo 1 to the lookaside
+        // fallback even though the real URL was sitting right there in
+        // all_subattachments. Processing the fuller source first means
+        // dedup-by-fbid always keeps the best data for a given photo.
+        final styles = attRaw['styles'];
+        if (styles is Map) {
+          debugPrint(
+              '[FB] story parse: attachment styles.__typename=${styles['__typename']}');
+          final styleAttachment = styles['attachment'];
+          if (styleAttachment is Map) {
+            final subattachments = styleAttachment['all_subattachments'];
+            if (subattachments is Map) {
+              final nodes = subattachments['nodes'];
+              final count = subattachments['count'];
+              if (nodes is List) {
+                debugPrint('[FB] story parse: all_subattachments '
+                    'count=$count nodes=${nodes.length}');
+                if (count is int && count != nodes.length) {
+                  debugPrint(
+                      '[FB] story parse: all_subattachments count=$count but '
+                      'nodes.length=${nodes.length} — Facebook truncated the '
+                      'list; no pagination implemented');
+                }
+                for (final subNode in nodes) {
+                  if (subNode is Map) {
+                    merge(_consumeMedia(
+                        subNode['media'], seenFbids, rawHtml));
+                  }
+                }
+              }
+            }
+            // Single photo/video posts (no album wrapper) can carry media
+            // directly here.
+            merge(_consumeMedia(
+                styleAttachment['media'], seenFbids, rawHtml));
+          }
+        }
+
+        // Fallback / single photo/video posts: media directly on the
+        // attachment. Dedup by fbid means this is a no-op whenever the
+        // album branch above already resolved the same fbid with real data.
+        merge(_consumeMedia(attRaw['media'], seenFbids, rawHtml));
+      }
+    }
+
+    if (photos.isEmpty && video == null) return null;
+    return _StoryData(
+      photos: photos,
+      video: video,
+      actorUrl: actorUrl,
+      actorName: actorName,
+      creationTime: creationTime is int ? creationTime : null,
+    );
+  }
+
+  /// Classifies a single `media` node as a photo (dedup'd by fbid) or a
+  /// video, or ignores it (anything else — e.g. null, or a typename we don't
+  /// handle). Photo URL preference: `viewer_image.uri` (full-size rendition,
+  /// field-verified 1300×1650 – 1536×2048) → `image.uri` (~590px thumbnail)
+  /// → the anonymous lookaside fallback by fbid (field-verified to return a
+  /// real JPEG with no session, e.g. 1300×1650 195KB).
+  _ConsumedMedia? _consumeMedia(
+      dynamic media, Set<String> seenPhotoFbids, String rawHtml) {
+    if (media is! Map) return null;
+    final typename = media['__typename'] as String?;
+    final id = media['id'] as String?;
+    if (id == null) return null;
+
+    if (typename == 'Photo') {
+      if (!seenPhotoFbids.add(id)) return null; // dedupe by fbid
+      final viewerUri = (media['viewer_image'] as Map?)?['uri'] as String?;
+      final imageUri = (media['image'] as Map?)?['uri'] as String?;
+      final rawUrl = viewerUri ?? imageUri;
+      final url = rawUrl != null
+          ? _unescape(rawUrl)
+          : 'https://lookaside.fbsbx.com/lookaside/crawler/media/?media_id=$id';
+      return _ConsumedMedia(photo: _StoryPhoto(id, url));
+    }
+
+    if (typename == 'Video') {
+      final url = _findVideoUrlInNode(media, rawHtml, id);
+      return _ConsumedMedia(video: _StoryVideo(id, url));
+    }
+
+    return null;
+  }
+
+  /// Finds the real CDN video URL for a Video attachment's [videoId]. There
+  /// is no /posts/ video fixture (field notes, 2026-09-14) — this is
+  /// deliberately defensive and NEVER falls back to an unscoped page-wide
+  /// search (that's the exact bug this whole story-JSON path exists to fix):
+  ///   1. Known field names (`playable_url`, `browser_native_hd_url`,
+  ///      `browser_native_sd_url`, `progressive_url`) within [mediaNode]'s own
+  ///      JSON subtree — already scoped, since [mediaNode] came from this
+  ///      post's attachments.
+  ///   2. A bounded window (±2000 chars) around each `"id":"<videoId>"`
+  ///      occurrence in [rawHtml] — still scoped to this specific video's id,
+  ///      unlike a page-wide regex.
+  String? _findVideoUrlInNode(Map mediaNode, String rawHtml, String videoId) {
+    final direct = _searchVideoUrlKeys(mediaNode);
+    if (direct != null) return direct;
+
+    final needle = '"id":"$videoId"';
+    var searchFrom = 0;
+    while (true) {
+      final idx = rawHtml.indexOf(needle, searchFrom);
+      if (idx == -1) break;
+      final start = (idx - 2000).clamp(0, rawHtml.length);
+      final end = (idx + 2000).clamp(0, rawHtml.length);
+      final found = _extractVideoUrlFromJson(rawHtml.substring(start, end));
+      if (found != null) return found;
+      searchFrom = idx + needle.length;
+    }
+    return null;
+  }
+
+  /// Recursively searches [obj] for one of the known video-URL field names.
+  static const _videoUrlKeys = [
+    'playable_url',
+    'browser_native_hd_url',
+    'browser_native_sd_url',
+    'progressive_url',
+  ];
+  String? _searchVideoUrlKeys(dynamic obj) {
+    if (obj is Map) {
+      for (final k in _videoUrlKeys) {
+        final v = obj[k];
+        if (v is String && v.isNotEmpty) return _unescape(v);
+      }
+      for (final v in obj.values) {
+        final found = _searchVideoUrlKeys(v);
+        if (found != null) return found;
+      }
+    } else if (obj is List) {
+      for (final v in obj) {
+        final found = _searchVideoUrlKeys(v);
+        if (found != null) return found;
+      }
+    }
+    return null;
+  }
+
+  /// Builds the final [MediaItem] list from parsed [_StoryData]. Username:
+  /// `actors[0].url` last path segment → `actors[0].name` → the non-numeric
+  /// `og:url` path segment → `'facebook'` (never [_usernameFromUrl] — that
+  /// fallback is for the legacy pipeline only). Date: `creation_time` (unix
+  /// seconds) → now.
+  ///
+  /// When the story parse yielded items, the `og:image` seed is deliberately
+  /// NOT added on top — for /posts/ pages og:image is photo 1 again (the
+  /// lookaside crawler URL for the same fbid), served under a different URL.
+  List<MediaItem> _buildItemsFromStory(
+      _StoryData story, String? ogUrl, List<String> ogImages) {
+    final username = _usernameFromStory(story, ogUrl);
+    final timestamp =
+        story.creationTime ?? (DateTime.now().millisecondsSinceEpoch ~/ 1000);
+    final items = <MediaItem>[];
+
+    if (story.video != null) {
+      if (story.video!.url != null) {
+        items.add(MediaItem(
+          id: '0',
+          mediaUrl: story.video!.url!,
+          thumbnailUrl: story.photos.isNotEmpty
+              ? story.photos.first.url
+              : (ogImages.isNotEmpty ? ogImages.first : null),
+          type: MediaItemType.video,
+          username: username,
+          itemIndex: 1,
+          postTimestamp: timestamp,
+        ));
+      } else {
+        debugPrint('[FB] story parse: Video attachment ${story.video!.id} '
+            'found but no resolvable URL — omitting');
+      }
+    }
+
+    for (final photo in story.photos) {
+      items.add(MediaItem(
+        id: '${items.length}',
+        mediaUrl: photo.url,
+        thumbnailUrl: photo.url,
+        type: MediaItemType.image,
+        username: username,
+        itemIndex: items.length + 1,
+        postTimestamp: timestamp,
+      ));
+    }
+    return items;
+  }
+
+  static String _usernameFromStory(_StoryData story, String? ogUrl) {
+    // Was: blindly take the LAST path segment of actors[0].url. Verified
+    // wrong on 2026-09-14 (code review): `facebook.com/people/<Name>/
+    // <numericId>/` yielded the numeric id, and `facebook.com/profile.php?
+    // id=…` yielded the literal `profile.php` — both real profile URL shapes
+    // Facebook uses when a page has no vanity username. Reuses
+    // [_firstUsableUrlSegment] (skips numeric segments and both of those
+    // shapes) instead, matching the `og:url` fallback's logic.
+    final actorSeg = _firstUsableUrlSegment(story.actorUrl);
+    if (actorSeg != null) return actorSeg;
+    if (story.actorName != null && story.actorName!.isNotEmpty) {
+      return story.actorName!;
+    }
+    final ogSeg = _nonNumericOgUrlSegment(ogUrl);
+    if (ogSeg != null) return ogSeg;
+    return 'facebook';
+  }
+
+  /// Test-only passthrough returning the final [MediaItem] list, mirroring
+  /// the shape tests assert on (mediaUrl/username/type/postTimestamp)
+  /// without needing the full `fetchItems` network pipeline.
+  @visibleForTesting
+  List<MediaItem> parseStoryForTesting(String html, String postId,
+      {String? ogUrl}) {
+    final story = _parseStoryFromDataSjs(html, postId);
+    if (story == null) return [];
+    return _buildItemsFromStory(story, ogUrl, const []);
   }
 
   // ── Helpers ──────────────────────────────────────────────────────────────
@@ -797,4 +1314,43 @@ class FacebookDownloaderService {
     );
     return result.replaceAll(r'\/', '/');
   }
+}
+
+// ── Story-JSON data model ──────────────────────────────────────────────────
+// Private to this file — tests reach these only through
+// FacebookDownloaderService.parseStoryForTesting, which returns MediaItems.
+
+class _StoryPhoto {
+  final String fbid;
+  final String url;
+  _StoryPhoto(this.fbid, this.url);
+}
+
+class _StoryVideo {
+  final String id;
+  final String? url;
+  _StoryVideo(this.id, this.url);
+}
+
+class _StoryData {
+  final List<_StoryPhoto> photos;
+  final _StoryVideo? video;
+  final String? actorUrl;
+  final String? actorName;
+  final int? creationTime;
+  _StoryData({
+    required this.photos,
+    this.video,
+    this.actorUrl,
+    this.actorName,
+    this.creationTime,
+  });
+}
+
+/// Result of classifying a single `media` node — at most one of [photo]/
+/// [video] is non-null.
+class _ConsumedMedia {
+  final _StoryPhoto? photo;
+  final _StoryVideo? video;
+  _ConsumedMedia({this.photo, this.video});
 }
