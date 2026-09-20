@@ -184,6 +184,24 @@ class LihkgDownloaderService {
           }
           if (attempt < _maxRetriesPerPage) {
             final retryNum = attempt + 1;
+            // LIHKG asked us to wait longer than we are willing to hold the
+            // UI for. Retrying at the capped delay would just burn the
+            // remaining attempts inside the same block and make the user
+            // wait ~45s for a certain failure, so stop now and report the
+            // real wait instead. (Leaving `data` null breaks the page loop.)
+            final askedFor = _parseRetryAfter(e.response);
+            if (askedFor != null && askedFor > _maxBackoff) {
+              if (urls.isEmpty) {
+                throw Exception(
+                  'LIHKG is rate-limiting requests right now — it asked us to '
+                  'wait ${askedFor.inSeconds}s. Try again shortly.',
+                );
+              }
+              debugPrint('[LIHKG] rate-limited at page $page (Retry-After '
+                  '${askedFor.inSeconds}s) — returning the ${urls.length} '
+                  'images found so far');
+              break;
+            }
             final backoff = _backoffForRetry(retryNum, e.response);
             debugPrint('[LIHKG] page $page rate-limited ($status) — retry '
                 '$retryNum/$_maxRetriesPerPage in '

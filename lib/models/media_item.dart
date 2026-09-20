@@ -1,6 +1,7 @@
 enum MediaItemType { video, image }
 
-/// A single downloadable media item extracted from an Instagram post.
+/// A single downloadable media item extracted from a post on any supported
+/// site (Instagram, Threads, X, Facebook, Tumblr, LIHKG, or a generic article).
 /// A carousel post can have many of these.
 class MediaItem {
   final String id;             // internal key (unused in filenames)

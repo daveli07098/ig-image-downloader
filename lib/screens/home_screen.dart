@@ -465,7 +465,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.16',
+                    'v1.1.0.17',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -604,7 +604,7 @@ class _UrlInputBar extends StatelessWidget {
               controller: controller,
               focusNode: focusNode,
               decoration: InputDecoration(
-                  hintText: 'Paste Instagram, X, or any article URL…',
+                  hintText: 'Paste any post or thread link…',
                 prefixIcon: const Icon(Icons.link),
                 suffixIcon: IconButton(
                   icon: const Icon(Icons.clear),
