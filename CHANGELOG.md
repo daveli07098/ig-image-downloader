@@ -1,5 +1,22 @@
 # Changelog
 
+## [2026-09-20] — Session: LIHKG support + share-sheet URL extraction
+
+### Fixed
+- fix(share): a share whose text was not JUST a URL was dropped in silence — share sheets send the post title followed by the link, and both the share provider and the paste handler required the text to *start with* a scheme. Sharing "<title> <link>" produced no fetch attempt at all, on every platform ([4f2a4e9])
+- fix(lihkg): LIHKG never worked — `LihkgDownloaderService` existed and its API approach was correct, but `downloader_service.dart` never imported or called it, so every link fell through to the generic article scraper and hit LIHKG's empty React shell ([4f2a4e9])
+- fix(lihkg): 429/503 is now reported honestly ("LIHKG is rate-limiting requests right now") instead of the misleading "no images found", with 2s/4s/8s jittered backoff, `Retry-After` honoured, and images from earlier pages kept ([4f2a4e9], [b8286e8])
+- fix(ui): the paste hint truncated to "Paste Instagram…" though the app handles Threads, Facebook, Tumblr and LIHKG too — now "Paste any post or thread link…" ([b8286e8])
+
+### Added
+- feat(lihkg): `lih.kg/<id>` short links. Hosts are parsed with `Uri`, not substring-matched, because post markup carries `i.lih.kg/thumbnail?u=…` (the thumbnail proxy) which must never be mistaken for a thread link nor downloaded in place of the full image ([4f2a4e9])
+- feat(share): `shared_text_url.extractFirstUrl` pulls the first link out of shared or pasted text, preferring a URL a platform matcher recognises and trimming trailing ASCII/CJK punctuation without eating a trailing slash or query string ([4f2a4e9])
+- test: suites for URL extraction, the share provider's handler, and LIHKG parsing/pagination/rate-limit handling ([4f2a4e9])
+
+### Known
+- Pages are spaced 700-1200 ms apart and the 10-page bound stays (logged when it truncates), so a long thread yields a bounded set of images.
+- Rapid repeated fetches from one IP will still trip LIHKG's rate limit; the app now says so plainly rather than claiming the thread is empty.
+
 ## [2026-09-14] — Session: Facebook /posts/ photo albums
 
 ### Fixed
