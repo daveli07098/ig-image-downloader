@@ -10,6 +10,7 @@ import 'download_ledger_service.dart';
 import 'facebook_downloader_service.dart';
 import 'generic_article_downloader_service.dart';
 import 'ig_url_parser.dart';
+import 'lihkg_downloader_service.dart';
 import 'rate_guard_service.dart';
 import 'session_service.dart';
 import 'storage_service.dart';
@@ -136,6 +137,11 @@ class DownloaderService {
       return FetchResult(
           items: await FacebookDownloaderService()
               .fetchItems(url, fbCookies: fbCookies));
+    }
+    if (LihkgDownloaderService.isLihkgUrl(url)) {
+      // Public JSON API, not an account-bearing endpoint — no session and no
+      // RateGuard needed here (see LihkgDownloaderService's doc comment).
+      return FetchResult(items: await LihkgDownloaderService().fetchItems(url));
     }
     if (!IgUrlParser.isInstagramUrl(url)) {
       // Direct media link (e.g. a raw CDN .jpg/.mp4 URL shared straight out of

@@ -10,6 +10,7 @@ import '../providers/share_intent_provider.dart';
 import '../services/dev_logger.dart';
 import '../services/rate_guard_service.dart';
 import '../services/session_service.dart';
+import '../services/shared_text_url.dart';
 import '../widgets/download_job_tile.dart';
 import '../models/download_job.dart';
 import 'login_screen.dart';
@@ -318,8 +319,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   void _openSelection(String url) {
-    final trimmed = url.trim();
-    if (!trimmed.startsWith('http://') && !trimmed.startsWith('https://')) {
+    // Text pasted or typed in may be a title-prefixed share (e.g. LIHKG's
+    // "title https://lih.kg/..." form) rather than a bare URL, so pull the
+    // URL out of it before validating.
+    final extracted = extractFirstUrl(url.trim());
+    if (extracted == null) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter a valid URL')),
       );
@@ -332,7 +336,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     DevLogger.instance.startNewSession();
     Navigator.of(context).push(
       MaterialPageRoute(
-        builder: (_) => SelectionScreen(igUrl: trimmed),
+        builder: (_) => SelectionScreen(igUrl: extracted),
       ),
     );
   }
@@ -461,7 +465,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.15',
+                    'v1.1.0.16',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
