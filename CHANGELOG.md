@@ -13,6 +13,9 @@
 - feat(share): `shared_text_url.extractFirstUrl` pulls the first link out of shared or pasted text, preferring a URL a platform matcher recognises and trimming trailing ASCII/CJK punctuation without eating a trailing slash or query string ([4f2a4e9])
 - test: suites for URL extraction, the share provider's handler, and LIHKG parsing/pagination/rate-limit handling ([4f2a4e9])
 
+### Added (rate-limit protection, [318ff7d])
+- feat(lihkg): `HostRateLimiter` — a persisted per-host cooldown (a fetch during it sends nothing and reports the countdown), a 15-minute bounded page cache (re-sharing a thread costs zero requests), a 20-req/60s sliding-window token bucket with the slot reserved synchronously before any await, and an adaptive pacing multiplier that rises after a throttle and decays after a clean crawl. Keyed by host so Tumblr/Facebook can adopt it.
+
 ### Known
 - Pages are spaced 700-1200 ms apart and the 10-page bound stays (logged when it truncates), so a long thread yields a bounded set of images.
 - Rapid repeated fetches from one IP will still trip LIHKG's rate limit; the app now says so plainly rather than claiming the thread is empty.
