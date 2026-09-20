@@ -3,7 +3,9 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:ig_downloader/services/host_rate_limiter.dart';
 import 'package:ig_downloader/services/lihkg_downloader_service.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Fake [HttpClientAdapter] backing a synthetic LIHKG API. [pageBodies] maps
 /// a 1-based page number to the raw JSON string the API_v2 endpoint would
@@ -12,6 +14,11 @@ import 'package:ig_downloader/services/lihkg_downloader_service.dart';
 class _LihkgApiAdapter implements HttpClientAdapter {
   _LihkgApiAdapter(this.pageBodies);
   final Map<int, String> pageBodies;
+
+  /// Total number of requests actually sent through this adapter — used to
+  /// assert an exact "zero HTTP requests" (cache hit / cooldown short-
+  /// circuit) rather than inferring it from returned data.
+  int requestCount = 0;
 
   @override
   void close({bool force = false}) {}
@@ -22,6 +29,7 @@ class _LihkgApiAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
+    requestCount++;
     final m = RegExp(r'/page/(\d+)').firstMatch(options.path);
     final page = m != null ? int.parse(m.group(1)!) : 1;
     final body = pageBodies[page] ?? jsonEncode({'success': 0});
@@ -35,12 +43,28 @@ class _LihkgApiAdapter implements HttpClientAdapter {
   }
 }
 
-LihkgDownloaderService _serviceFor(Map<int, String> pageBodies) {
+/// A trivial fake clock a test can advance explicitly (e.g. past the cache
+/// TTL or a cooldown window) without ever sleeping for real.
+class _FakeClock {
+  DateTime now = DateTime(2026, 1, 1);
+  DateTime call() => now;
+  void advance(Duration d) => now = now.add(d);
+}
+
+LihkgDownloaderService _serviceFor(
+  Map<int, String> pageBodies, {
+  _LihkgApiAdapter? adapter,
+  HostRateLimiter? rateLimiter,
+}) {
   final dio = Dio(BaseOptions(responseType: ResponseType.plain));
-  dio.httpClientAdapter = _LihkgApiAdapter(pageBodies);
+  dio.httpClientAdapter = adapter ?? _LihkgApiAdapter(pageBodies);
   // No-op delay so the inter-page pacing pause never makes the test suite
   // actually sleep — the pacing value itself is exercised separately below.
-  return LihkgDownloaderService(dio: dio, delay: (_) async {});
+  return LihkgDownloaderService(
+    dio: dio,
+    delay: (_) async {},
+    rateLimiter: rateLimiter,
+  );
 }
 
 /// One scripted response for a single request to a page: either a 429/503
@@ -70,6 +94,9 @@ class _FlakyLihkgApiAdapter implements HttpClientAdapter {
   final Map<int, List<_Attempt>> pageAttempts;
   final Map<int, int> _callsSoFar = {};
 
+  /// Total number of requests actually sent — see [_LihkgApiAdapter.requestCount].
+  int requestCount = 0;
+
   @override
   void close({bool force = false}) {}
 
@@ -79,6 +106,7 @@ class _FlakyLihkgApiAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
+    requestCount++;
     final m = RegExp(r'/page/(\d+)').firstMatch(options.path);
     final page = m != null ? int.parse(m.group(1)!) : 1;
     final callIndex = _callsSoFar[page] ?? 0;
@@ -110,12 +138,15 @@ class _FlakyLihkgApiAdapter implements HttpClientAdapter {
 LihkgDownloaderService _flakyServiceFor(
   Map<int, List<_Attempt>> pageAttempts, {
   Future<void> Function(Duration)? delay,
+  _FlakyLihkgApiAdapter? adapter,
+  HostRateLimiter? rateLimiter,
 }) {
   final dio = Dio(BaseOptions(responseType: ResponseType.plain));
-  dio.httpClientAdapter = _FlakyLihkgApiAdapter(pageAttempts);
+  dio.httpClientAdapter = adapter ?? _FlakyLihkgApiAdapter(pageAttempts);
   return LihkgDownloaderService(
     dio: dio,
     delay: delay ?? (_) async {},
+    rateLimiter: rateLimiter,
   );
 }
 
@@ -137,6 +168,19 @@ String _pageJson({
     });
 
 void main() {
+  setUp(() {
+    // HostRateLimiter persists the cooldown/pacing state via
+    // SharedPreferences — without a mocked store every test touching it
+    // would throw (no platform channel in the test environment).
+    SharedPreferences.setMockInitialValues({});
+    // Every test that doesn't inject its own HostRateLimiter falls back to
+    // LihkgDownloaderService's default, HostRateLimiter.instance — a
+    // process-wide singleton (see its doc comment for why). Without this
+    // reset its in-memory state (cooldown/pacing/cache/bucket) would leak
+    // across tests even though the prefs mock above is reset each time.
+    HostRateLimiter.instance.clearForTest();
+  });
+
   group('LihkgDownloaderService.isLihkgUrl', () {
     test('true for lih.kg numeric short link', () {
       expect(LihkgDownloaderService.isLihkgUrl('https://lih.kg/4158154'),
@@ -416,6 +460,112 @@ void main() {
       // shorter than the 3s Retry-After header, so the header must win —
       // and verbatim, since only the computed backoff is jittered.
       expect(delays, [const Duration(seconds: 3)]);
+    });
+  });
+
+  group('LihkgDownloaderService.fetchItems — HostRateLimiter cooldown', () {
+    test(
+        'a fail-fast 429 (Retry-After beyond the 15s cap) is recorded as a '
+        "cooldown: an immediate re-share makes ZERO HTTP requests and throws "
+        'the countdown message instead of re-triggering the block', () async {
+      final adapter = _FlakyLihkgApiAdapter({
+        1: const [_Attempt.fail(429, retryAfterHeader: '60')],
+      });
+      final service = _flakyServiceFor({}, adapter: adapter);
+
+      await expectLater(
+        () => service.fetchItems('https://lihkg.com/thread/10'),
+        throwsA(isA<Exception>().having(
+          (e) => e.toString(),
+          'message',
+          contains('wait 60s'),
+        )),
+      );
+      expect(adapter.requestCount, 1,
+          reason: 'the fail-fast path stops after a single attempt');
+
+      // Immediate re-share of a DIFFERENT thread — the cooldown is per-host
+      // (lihkg.com), not per-thread, so it must still short-circuit here.
+      await expectLater(
+        () => service.fetchItems('https://lihkg.com/thread/11'),
+        throwsA(isA<Exception>().having(
+          (e) => e.toString(),
+          'message',
+          allOf(
+            contains('LIHKG is rate-limiting requests right now'),
+            contains('try again in'),
+          ),
+        )),
+      );
+      expect(adapter.requestCount, 1,
+          reason: 'the cooldown check happens before any request is sent — '
+              'the second call must not touch the network at all');
+    });
+  });
+
+  group('LihkgDownloaderService.fetchItems — response cache', () {
+    test(
+        'a re-share of the same thread inside the 15-minute cache TTL makes '
+        'ZERO HTTP requests and returns the same items; after the TTL '
+        'expires it fetches again', () async {
+      final clock = _FakeClock();
+      final rateLimiter = HostRateLimiter(now: clock.call, delay: (_) async {});
+      final adapter = _LihkgApiAdapter({
+        1: _pageJson(
+          msgs: ['<img src="https://na.cx/i/one.jpg" />'],
+          totalPage: 1,
+        ),
+      });
+      final service =
+          _serviceFor({}, adapter: adapter, rateLimiter: rateLimiter);
+
+      final first = await service.fetchItems('https://lihkg.com/thread/20');
+      expect(adapter.requestCount, 1);
+      expect(first.single.mediaUrl, 'https://na.cx/i/one.jpg');
+
+      final second = await service.fetchItems('https://lihkg.com/thread/20');
+      expect(adapter.requestCount, 1,
+          reason: 'served entirely from cache — zero HTTP requests');
+      expect(second.single.mediaUrl, first.single.mediaUrl);
+
+      // Advance past HostRateLimiter.defaultCacheTtl (15 minutes).
+      clock.advance(const Duration(minutes: 15, seconds: 1));
+
+      final third = await service.fetchItems('https://lihkg.com/thread/20');
+      expect(adapter.requestCount, 2,
+          reason: 'the cache entry expired — the page is fetched again');
+      expect(third.single.mediaUrl, first.single.mediaUrl);
+    });
+
+    test(
+        'a `{"success":0}` response is never cached, so a retry shortly '
+        'after still hits the network instead of being stuck on the same '
+        'failure for the full TTL', () async {
+      final adapter = _FlakyLihkgApiAdapter({
+        1: [
+          const _Attempt.success('{"success":0}'),
+          _Attempt.success(_pageJson(
+            msgs: ['<img src="https://na.cx/i/one.jpg" />'],
+            totalPage: 1,
+          )),
+        ],
+      });
+      final service = _flakyServiceFor({}, adapter: adapter);
+
+      await expectLater(
+        () => service.fetchItems('https://lihkg.com/thread/30'),
+        throwsA(isA<Exception>().having(
+          (e) => e.toString(),
+          'message',
+          contains('No images found'),
+        )),
+      );
+      expect(adapter.requestCount, 1);
+
+      final items = await service.fetchItems('https://lihkg.com/thread/30');
+      expect(adapter.requestCount, 2,
+          reason: 'the success:0 response must not have been cached');
+      expect(items.single.mediaUrl, 'https://na.cx/i/one.jpg');
     });
   });
 }
