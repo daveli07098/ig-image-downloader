@@ -1,5 +1,14 @@
 # Changelog
 
+## [2026-09-23] — Session: Tumblr login
+
+### Added
+- feat(tumblr): Tumblr is a 4th login platform (Accounts sheet, status chip, "open in app" → `/dashboard`). The full tumblr.com cookie string is stored, like Facebook, since the HttpOnly `sid` session cookie is only readable via the native cookie channel; login counts as done once the WebView has left `/login` and `sid=` is present ([d634b81])
+- feat(tumblr): the Tumblr session is sent as a `Cookie` header on `tumblr.com` / `*.tumblr.com` page fetches only — never other sites or `*.media.tumblr.com`; redirects are followed by hand so the cookie is re-scoped per hop ([d634b81])
+
+### Fixed
+- fix(tumblr): blogs hidden from logged-out visitors (302 → `/login_required/<blog>`) failed with the generic "no media" error; now a clear "log in to Tumblr in Accounts" message, or "session may have expired" when a session was sent ([d634b81])
+
 ## [2026-09-20] — Session: LIHKG support + share-sheet URL extraction
 
 ### Fixed
