@@ -1,7 +1,7 @@
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// Supported login platforms.
-enum LoginPlatform { instagram, x, facebook }
+enum LoginPlatform { instagram, x, facebook, tumblr }
 
 /// Persists session cookies for multiple platforms so they survive app restarts.
 /// The relevant cookie is injected into Dio requests via [DownloaderService].
@@ -14,12 +14,17 @@ class SessionService {
     // Facebook stores the entire cookie string (c_user + xs + datr etc.)
     // rather than a single named value because all three are needed together.
     LoginPlatform.facebook: 'fb_cookies',
+    // Tumblr also stores the full cookie string: its session cookie (sid) is
+    // HttpOnly and only readable via the native cookie channel, and Tumblr
+    // pairs it with companion cookies (logged_in, pfu, ...) on page loads.
+    LoginPlatform.tumblr: 'tumblr_cookies',
   };
 
   static const _usernameKeys = {
     LoginPlatform.instagram: 'ig_username',
     LoginPlatform.x: 'x_username',
     LoginPlatform.facebook: 'fb_username',
+    LoginPlatform.tumblr: 'tumblr_username',
   };
 
   // Threads session captured separately by navigating to threads.com after IG login.

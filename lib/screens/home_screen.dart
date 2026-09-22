@@ -30,9 +30,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   bool _igLoggedIn = false;
   bool _xLoggedIn = false;
   bool _fbLoggedIn = false;
+  bool _tumblrLoggedIn = false;
   String? _igUsername;
   String? _xUsername;
   String? _fbUsername;
+  String? _tumblrUsername;
 
   // Used to read WebView cookies (e.g. X's ct0 CSRF token) for on-demand
   // username resolution without requiring a re-login.
@@ -48,9 +50,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final ig = await SessionService.isLoggedIn(LoginPlatform.instagram);
     final x = await SessionService.isLoggedIn(LoginPlatform.x);
     final fb = await SessionService.isLoggedIn(LoginPlatform.facebook);
+    final tumblr = await SessionService.isLoggedIn(LoginPlatform.tumblr);
     var igUser = ig ? await SessionService.getUsername(LoginPlatform.instagram) : null;
     var xUser = x ? await SessionService.getUsername(LoginPlatform.x) : null;
     var fbUserRaw = fb ? await SessionService.getUsername(LoginPlatform.facebook) : null;
+    final tumblrUser =
+        tumblr ? await SessionService.getUsername(LoginPlatform.tumblr) : null;
 
     // Resolve usernames on-demand for sessions that predate username storage
     // (logged in before this feature was added). Saves result so this only
@@ -73,8 +78,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ? null
         : fbUserRaw;
     if (mounted) setState(() {
-      _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb;
+      _igLoggedIn = ig; _xLoggedIn = x; _fbLoggedIn = fb; _tumblrLoggedIn = tumblr;
       _igUsername = igUser; _xUsername = xUser; _fbUsername = fbUser;
+      _tumblrUsername = tumblrUser;
     });
   }
 
@@ -378,9 +384,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           igLoggedIn: _igLoggedIn,
           xLoggedIn: _xLoggedIn,
           fbLoggedIn: _fbLoggedIn,
+          tumblrLoggedIn: _tumblrLoggedIn,
           igUsername: _igUsername,
           xUsername: _xUsername,
           fbUsername: _fbUsername,
+          tumblrUsername: _tumblrUsername,
           onLogin: (platform) async {
             final nav = Navigator.of(context);
             nav.pop();
@@ -400,11 +408,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               LoginPlatform.instagram: 'https://www.instagram.com/',
               LoginPlatform.x: 'https://x.com/home',
               LoginPlatform.facebook: 'https://www.facebook.com/',
+              LoginPlatform.tumblr: 'https://www.tumblr.com/dashboard',
             };
             const labels = {
               LoginPlatform.instagram: 'Instagram',
               LoginPlatform.x: 'X',
               LoginPlatform.facebook: 'Facebook',
+              LoginPlatform.tumblr: 'Tumblr',
             };
             nav.push(
               MaterialPageRoute(
@@ -421,7 +431,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             await _refreshLoginState(); // refresh parent flags first…
             setSheetState(() {});       // …then rebuild the open sheet with them
             if (!mounted) return;
-            const labels = {LoginPlatform.instagram: 'Instagram', LoginPlatform.x: 'X', LoginPlatform.facebook: 'Facebook'};
+            const labels = {
+              LoginPlatform.instagram: 'Instagram',
+              LoginPlatform.x: 'X',
+              LoginPlatform.facebook: 'Facebook',
+              LoginPlatform.tumblr: 'Tumblr',
+            };
             messenger.showSnackBar(
               SnackBar(
                 content: Text('Logged out of ${labels[platform]}'),
@@ -465,7 +480,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 children: [
                   Text('IG Downloader', overflow: TextOverflow.ellipsis),
                   Text(
-                    'v1.1.0.18',
+                    'v1.1.0.19',
                     style: TextStyle(fontSize: 11, fontWeight: FontWeight.w400),
                   ),
                 ],
@@ -477,10 +492,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           // Multi-platform accounts button
           IconButton(
             icon: Icon(
-              (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
+              (_igLoggedIn || _xLoggedIn || _fbLoggedIn || _tumblrLoggedIn)
                   ? Icons.account_circle
                   : Icons.account_circle_outlined,
-              color: (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
+              color: (_igLoggedIn || _xLoggedIn || _fbLoggedIn || _tumblrLoggedIn)
                   ? Theme.of(context).colorScheme.primary
                   : null,
             ),
@@ -538,14 +553,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           _RateGuardBanner(onRelogin: _reloginInstagram),
 
           // ── Logged-in accounts status bar ────────────────────────────────
-          if (_igLoggedIn || _xLoggedIn || _fbLoggedIn)
+          if (_igLoggedIn || _xLoggedIn || _fbLoggedIn || _tumblrLoggedIn)
             _AccountStatusBar(
               igLoggedIn: _igLoggedIn,
               xLoggedIn: _xLoggedIn,
               fbLoggedIn: _fbLoggedIn,
+              tumblrLoggedIn: _tumblrLoggedIn,
               igUsername: _igUsername,
               xUsername: _xUsername,
               fbUsername: _fbUsername,
+              tumblrUsername: _tumblrUsername,
               onTap: () => _showAccountsSheet(context),
             ),
 
@@ -684,18 +701,22 @@ class _AccountStatusBar extends StatelessWidget {
     required this.igLoggedIn,
     required this.xLoggedIn,
     required this.fbLoggedIn,
+    required this.tumblrLoggedIn,
     this.igUsername,
     this.xUsername,
     this.fbUsername,
+    this.tumblrUsername,
     required this.onTap,
   });
 
   final bool igLoggedIn;
   final bool xLoggedIn;
   final bool fbLoggedIn;
+  final bool tumblrLoggedIn;
   final String? igUsername;
   final String? xUsername;
   final String? fbUsername;
+  final String? tumblrUsername;
   final VoidCallback onTap;
 
   @override
@@ -727,6 +748,7 @@ class _AccountStatusBar extends StatelessWidget {
     addChip(Icons.camera_alt_outlined, igLoggedIn, igUsername, 'Instagram');
     addChip(Icons.close, xLoggedIn, xUsername, 'X');
     addChip(Icons.facebook_rounded, fbLoggedIn, fbUsername, 'Facebook');
+    addChip(_tumblrIcon, tumblrLoggedIn, tumblrUsername, 'Tumblr');
 
     return InkWell(
       onTap: onTap,
@@ -756,6 +778,10 @@ class _AccountStatusBar extends StatelessWidget {
   }
 }
 
+/// No built-in Tumblr logo in Material Icons — a neutral dashboard glyph
+/// stands in (Tumblr's logged-in home is its /dashboard).
+const _tumblrIcon = Icons.dashboard_outlined;
+
 // ── Accounts bottom sheet ───────────────────────────────────────────────────
 
 class _AccountsSheet extends StatelessWidget {
@@ -763,9 +789,11 @@ class _AccountsSheet extends StatelessWidget {
     required this.igLoggedIn,
     required this.xLoggedIn,
     required this.fbLoggedIn,
+    required this.tumblrLoggedIn,
     this.igUsername,
     this.xUsername,
     this.fbUsername,
+    this.tumblrUsername,
     required this.onLogin,
     required this.onLogout,
     required this.onOpen,
@@ -774,9 +802,11 @@ class _AccountsSheet extends StatelessWidget {
   final bool igLoggedIn;
   final bool xLoggedIn;
   final bool fbLoggedIn;
+  final bool tumblrLoggedIn;
   final String? igUsername;
   final String? xUsername;
   final String? fbUsername;
+  final String? tumblrUsername;
   final void Function(LoginPlatform) onLogin;
   final void Function(LoginPlatform) onLogout;
   final void Function(LoginPlatform) onOpen;
@@ -785,6 +815,7 @@ class _AccountsSheet extends StatelessWidget {
     (platform: LoginPlatform.instagram, label: 'Instagram', icon: Icons.camera_alt_outlined),
     (platform: LoginPlatform.x, label: 'X (Twitter)', icon: Icons.close /* X logo closest built-in */),
     (platform: LoginPlatform.facebook, label: 'Facebook', icon: Icons.facebook_rounded),
+    (platform: LoginPlatform.tumblr, label: 'Tumblr', icon: _tumblrIcon),
   ];
 
   @override
@@ -793,11 +824,13 @@ class _AccountsSheet extends StatelessWidget {
       LoginPlatform.instagram: igLoggedIn,
       LoginPlatform.x: xLoggedIn,
       LoginPlatform.facebook: fbLoggedIn,
+      LoginPlatform.tumblr: tumblrLoggedIn,
     };
     final usernames = {
       LoginPlatform.instagram: igUsername,
       LoginPlatform.x: xUsername,
       LoginPlatform.facebook: fbUsername,
+      LoginPlatform.tumblr: tumblrUsername,
     };
     final cs = Theme.of(context).colorScheme;
 

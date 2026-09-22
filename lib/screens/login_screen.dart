@@ -74,6 +74,22 @@ const _configs = {
     ],
     storeFullCookies: true,
   ),
+  LoginPlatform.tumblr: _PlatformConfig(
+    label: 'Tumblr',
+    loginUrl: 'https://www.tumblr.com/login',
+    cookieDomain: 'https://www.tumblr.com',
+    // Detect login completion by the HttpOnly `sid` session cookie, and store
+    // the full cookie string (sid + logged_in etc.) like Facebook so Tumblr
+    // page fetches carry the complete session.
+    cookieName: 'sid',
+    loginFlowPatterns: [
+      'tumblr.com/login',   // also matches /login_required/<blog>
+      '/register',
+      '/onboarding',
+      '/reset_password',
+    ],
+    storeFullCookies: true,
+  ),
 };
 
 /// Lower-cased substrings that appear on Instagram's "action blocked" /
@@ -442,6 +458,10 @@ class _LoginScreenState extends State<LoginScreen> {
         return _fetchXUsername(token);
       case LoginPlatform.facebook:
         return _fetchFbUsername(token);
+      case LoginPlatform.tumblr:
+        // No cheap, verified endpoint for the blog name — the Accounts row
+        // shows "Logged in" instead.
+        return null;
     }
   }
 

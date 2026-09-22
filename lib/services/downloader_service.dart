@@ -164,10 +164,17 @@ class DownloaderService {
           ),
         ]);
       }
-      // Not IG, X, Threads, or Facebook — try generic article extraction
+      // Not IG, X, Threads, or Facebook — try generic article extraction.
+      // Tumblr is handled there too; its session (if logged in) is passed in
+      // so blogs hidden from logged-out visitors can load. Read only for
+      // Tumblr URLs — the service itself scopes the cookie per request host.
+      final tumblrCookies = GenericArticleDownloaderService.isTumblrHost(url)
+          ? await SessionService.getSessionId(LoginPlatform.tumblr)
+          : null;
       return FetchResult(
           items: await GenericArticleDownloaderService(
         renderedHtmlFallback: renderedHtmlFallback,
+        tumblrCookies: tumblrCookies,
       ).fetchItems(url));
     }
     return _fetchIgItems(url);

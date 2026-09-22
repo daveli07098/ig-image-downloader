@@ -62,6 +62,67 @@ Map<String, dynamic> _stateWithObjects(List<Map<String, dynamic>> objects) => {
       },
     };
 
+/// Fake adapter keyed by URL (without query string): each route is either a
+/// redirect (`location` set, 3xx status) or a page body. Records every
+/// request's URL and `Cookie` header so tests can assert exactly which hosts
+/// received the Tumblr session. Unknown URLs get a small NPF page, so a
+/// request that reaches one still parses.
+class _RoutingAdapter implements HttpClientAdapter {
+  _RoutingAdapter(this.routes);
+  final Map<String, ({int status, String? location, String body})> routes;
+  final requests = <({Uri uri, String? cookie})>[];
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    final uri = options.uri;
+    requests.add((uri: uri, cookie: options.headers['Cookie'] as String?));
+    final route = routes['${uri.scheme}://${uri.host}${uri.path}'];
+    if (route == null) {
+      return ResponseBody.fromString(_npfHtml(_singleImageState()), 200,
+          headers: {
+            Headers.contentTypeHeader: ['text/html; charset=utf-8'],
+          });
+    }
+    return ResponseBody.fromString(route.body, route.status, headers: {
+      Headers.contentTypeHeader: ['text/html; charset=utf-8'],
+      if (route.location != null) 'location': [route.location!],
+    });
+  }
+}
+
+Map<String, dynamic> _singleImageState() => {
+      'PeeprRoute': {
+        'initialTimeline': {
+          'objects': [
+            {
+              'idString': '827958757741002752',
+              'blogName': 'someblog',
+              'content': [
+                {
+                  'type': 'image',
+                  'media': [
+                    {
+                      'url':
+                          'https://64.media.tumblr.com/aaa/bbb/s1280x1920/img.jpg',
+                      'width': 1280,
+                      'height': 1920,
+                    }
+                  ],
+                }
+              ],
+            }
+          ],
+        },
+      },
+    };
+
 void main() {
   group('Tumblr NPF (___INITIAL_STATE___) — primary path', () {
     test('image post: 3 items, original-dimension URLs, real blog name',
@@ -403,4 +464,146 @@ void main() {
       );
     });
   });
+
+  group('Tumblr login wall + session scoping', () {
+    const postUrl =
+        'https://www.tumblr.com/hidden-blog/827958757741002752?source=share';
+    const postKey = 'https://www.tumblr.com/hidden-blog/827958757741002752';
+    const wallUrl = 'https://www.tumblr.com/login_required/hidden-blog';
+    const shell = '<!DOCTYPE html><html><head><title>Tumblr</title></head>'
+        '<body><div id="root"></div></body></html>';
+
+    test('isTumblrHost matches tumblr.com and subdomains only', () {
+      expect(GenericArticleDownloaderService.isTumblrHost(
+          'https://www.tumblr.com/a/1'), isTrue);
+      expect(GenericArticleDownloaderService.isTumblrHost(
+          'https://tumblr.com/a/1'), isTrue);
+      expect(GenericArticleDownloaderService.isTumblrHost(
+          'https://someblog.tumblr.com/post/1'), isTrue);
+      expect(GenericArticleDownloaderService.isTumblrHost(
+          'https://nottumblr.com/a'), isFalse);
+      expect(GenericArticleDownloaderService.isTumblrHost(
+          'https://tumblr.com.evil.example/a'), isFalse);
+      expect(GenericArticleDownloaderService.isTumblrHost(
+          'https://example.com/tumblr.com'), isFalse);
+    });
+
+    test('session is never sent to the media CDN or non-Tumblr hosts', () {
+      bool sends(String u) =>
+          GenericArticleDownloaderService.sendsTumblrSessionTo(Uri.parse(u));
+      expect(sends('https://www.tumblr.com/blog/1'), isTrue);
+      expect(sends('https://someblog.tumblr.com/post/1'), isTrue);
+      expect(sends('https://64.media.tumblr.com/a/b/s640x960/c.jpg'), isFalse);
+      expect(sends('https://media.tumblr.com/a.jpg'), isFalse);
+      expect(sends('https://example.com/'), isFalse);
+    });
+
+    test('isTumblrLoginWall detects /login_required/ on Tumblr only', () {
+      expect(GenericArticleDownloaderService.isTumblrLoginWall(
+          Uri.parse(wallUrl)), isTrue);
+      expect(GenericArticleDownloaderService.isTumblrLoginWall(
+          Uri.parse('https://www.tumblr.com/hidden-blog/1')), isFalse);
+      expect(GenericArticleDownloaderService.isTumblrLoginWall(
+          Uri.parse('https://example.com/login_required/x')), isFalse);
+    });
+
+    test('redirect to login wall without a session → log-in message',
+        () async {
+      final dio = Dio(BaseOptions(responseType: ResponseType.plain));
+      // Dio's real adapter reports followed redirects via
+      // ResponseBody.redirects → resp.realUri; simulate that final hop.
+      dio.httpClientAdapter = _RedirectedAdapter(Uri.parse(wallUrl), shell);
+      final service = GenericArticleDownloaderService(dio: dio);
+      await expectLater(
+        service.fetchItems(postUrl),
+        throwsA(predicate((e) =>
+            e.toString().contains('only visible to logged-in users') &&
+            e.toString().contains('Log in to Tumblr in Accounts'))),
+      );
+    });
+
+    test('login wall even with a session → session-expired message',
+        () async {
+      final adapter = _RoutingAdapter({
+        postKey: (status: 302, location: wallUrl, body: ''),
+        wallUrl: (status: 200, location: null, body: shell),
+      });
+      final dio = Dio(BaseOptions(responseType: ResponseType.plain))
+        ..httpClientAdapter = adapter;
+      final service = GenericArticleDownloaderService(
+          dio: dio, tumblrCookies: 'sid=abc; logged_in=1');
+      await expectLater(
+        service.fetchItems(postUrl),
+        throwsA(predicate((e) => e.toString().contains('may have expired'))),
+      );
+      expect(adapter.requests.map((r) => r.uri.path),
+          ['/hidden-blog/827958757741002752', '/login_required/hidden-blog']);
+      expect(adapter.requests.every((r) => r.cookie == 'sid=abc; logged_in=1'),
+          isTrue);
+    });
+
+    test('logged-in Tumblr fetch sends the session and parses the post',
+        () async {
+      final adapter = _RoutingAdapter({});
+      final dio = Dio(BaseOptions(responseType: ResponseType.plain))
+        ..httpClientAdapter = adapter;
+      final service = GenericArticleDownloaderService(
+          dio: dio, tumblrCookies: 'sid=abc');
+      final items = await service.fetchItems(postUrl);
+      expect(items, isNotEmpty);
+      expect(adapter.requests.single.cookie, 'sid=abc');
+    });
+
+    test('session is dropped on a redirect hop that leaves Tumblr', () async {
+      const offsite = 'https://example.com/landing';
+      final adapter = _RoutingAdapter({
+        postKey: (status: 302, location: offsite, body: ''),
+      });
+      final dio = Dio(BaseOptions(responseType: ResponseType.plain))
+        ..httpClientAdapter = adapter;
+      final service = GenericArticleDownloaderService(
+          dio: dio, tumblrCookies: 'sid=abc');
+      await service.fetchItems(postUrl);
+      expect(adapter.requests.length, 2);
+      expect(adapter.requests.first.cookie, 'sid=abc');
+      expect(adapter.requests.last.uri.host, 'example.com');
+      expect(adapter.requests.last.cookie, isNull);
+    });
+
+    test('non-Tumblr page never receives the Tumblr session', () async {
+      final adapter = _RoutingAdapter({});
+      final dio = Dio(BaseOptions(responseType: ResponseType.plain))
+        ..httpClientAdapter = adapter;
+      final service = GenericArticleDownloaderService(
+          dio: dio, tumblrCookies: 'sid=abc');
+      await service.fetchItems('https://example.com/article/1');
+      expect(adapter.requests.single.cookie, isNull);
+    });
+  });
+}
+
+/// Returns [html] as if Dio had followed redirects ending at [finalUri]
+/// (sets [ResponseBody.redirects], which Dio turns into `realUri`).
+class _RedirectedAdapter implements HttpClientAdapter {
+  _RedirectedAdapter(this.finalUri, this.html);
+  final Uri finalUri;
+  final String html;
+
+  @override
+  void close({bool force = false}) {}
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    return ResponseBody.fromString(
+      html,
+      200,
+      headers: {
+        Headers.contentTypeHeader: ['text/html; charset=utf-8'],
+      },
+    )..redirects = [RedirectRecord(302, 'GET', finalUri)];
+  }
 }

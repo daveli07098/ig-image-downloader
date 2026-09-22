@@ -79,13 +79,26 @@ class GenericArticleDownloaderService {
   /// imports and unit-testable, since it never touches a BuildContext itself.
   final Future<String> Function(String url)? renderedHtmlFallback;
 
-  GenericArticleDownloaderService({Dio? dio, this.renderedHtmlFallback})
-      : _dio = dio ??
+  /// Full Tumblr cookie string captured at login (see
+  /// `SessionService` / `LoginPlatform.tumblr`), or null when logged out.
+  /// Sent as a `Cookie` header ONLY on page requests to Tumblr hosts (see
+  /// [sendsTumblrSessionTo]) — never to other sites or the media CDN. Needed
+  /// for blogs Tumblr hides from logged-out visitors, which otherwise
+  /// redirect to `/login_required/<blog>` (see [isTumblrLoginWall]).
+  final String? tumblrCookies;
+
+  static const _maxRedirects = 8;
+
+  GenericArticleDownloaderService({
+    Dio? dio,
+    this.renderedHtmlFallback,
+    this.tumblrCookies,
+  })  : _dio = dio ??
             Dio(BaseOptions(
               connectTimeout: const Duration(seconds: 15),
               receiveTimeout: const Duration(seconds: 30),
               followRedirects: true,
-              maxRedirects: 8,
+              maxRedirects: _maxRedirects,
               headers: {
                 'User-Agent': kRealChromeMobileUA,
                 'Accept-Language': 'en-US,en;q=0.9',
@@ -103,6 +116,35 @@ class GenericArticleDownloaderService {
     final scope = _findContent(doc) ?? doc.body ?? doc.documentElement!;
     return _extractImages(scope, baseUrl).isNotEmpty;
   }
+
+  // ── Tumblr session scoping ───────────────────────────────────────────────
+
+  /// True for `tumblr.com` and any `*.tumblr.com` host (e.g.
+  /// `www.tumblr.com`, `<blog>.tumblr.com`). Exact-suffix match on a dot, so
+  /// look-alike hosts such as `nottumblr.com` never qualify.
+  static bool isTumblrHost(String url) {
+    final host = Uri.tryParse(url)?.host.toLowerCase() ?? '';
+    return host == 'tumblr.com' || host.endsWith('.tumblr.com');
+  }
+
+  /// Whether the Tumblr session cookie may be sent to [uri]: a Tumblr page
+  /// host, but not the media CDN (`*.media.tumblr.com`), which serves public
+  /// files and has no use for the session.
+  static bool sendsTumblrSessionTo(Uri uri) {
+    final host = uri.host.toLowerCase();
+    return isTumblrHost(uri.toString()) &&
+        host != 'media.tumblr.com' &&
+        !host.endsWith('.media.tumblr.com');
+  }
+
+  /// True when [uri] is Tumblr's login wall — where a blog hidden from
+  /// logged-out visitors redirects (`/login_required/<blog>`), an empty
+  /// shell with no post data in it.
+  static bool isTumblrLoginWall(Uri uri) =>
+      isTumblrHost(uri.toString()) && uri.path.startsWith('/login_required');
+
+  bool get _hasTumblrSession =>
+      tumblrCookies != null && tumblrCookies!.trim().isNotEmpty;
 
   // ── Fetch items ──────────────────────────────────────────────────────────
 
@@ -171,9 +213,20 @@ class GenericArticleDownloaderService {
   /// genuine 403 rather than an anti-bot block, and throws the original,
   /// accurate "Failed to load page (403)" error so the caller doesn't
   /// silently parse it as content. Any other HTTP failure rethrows.
+  ///
+  /// A Tumblr request that ends on the login wall (see [isTumblrLoginWall])
+  /// throws a login-specific error instead of returning the empty shell.
   Future<String> _fetchPlain(String url) async {
     try {
-      final resp = await _dio.get<String>(url);
+      final resp = await _get(url);
+      if (isTumblrLoginWall(resp.realUri)) {
+        debugPrint('[Article] Tumblr login wall: ${resp.realUri}');
+        throw Exception(_hasTumblrSession
+            ? 'Tumblr still requires login — your Tumblr session may have '
+                'expired. Log in again in Accounts.'
+            : 'This Tumblr blog is only visible to logged-in users. Log in '
+                'to Tumblr in Accounts and try again.');
+      }
       if (resp.statusCode != 200 || resp.data == null) {
         throw Exception('Failed to load page (${resp.statusCode})');
       }
@@ -190,6 +243,36 @@ class GenericArticleDownloaderService {
       }
       rethrow;
     }
+  }
+
+  /// GET [url]. Without a Tumblr session (or for a non-Tumblr URL) this is a
+  /// plain GET with Dio following redirects itself. With a session, redirects
+  /// are followed by hand so the `Cookie` header is re-decided per hop via
+  /// [sendsTumblrSessionTo]: dart:io copies request headers onto the redirect
+  /// hops it follows, which would carry the session off-site if a Tumblr page
+  /// ever redirected elsewhere. Either way, `resp.realUri` is the final URL.
+  Future<Response<String>> _get(String url) async {
+    var uri = Uri.parse(url);
+    if (!_hasTumblrSession || !sendsTumblrSessionTo(uri)) {
+      return _dio.get<String>(url);
+    }
+    for (var hop = 0; hop <= _maxRedirects; hop++) {
+      final resp = await _dio.getUri<String>(
+        uri,
+        options: Options(
+          followRedirects: false,
+          validateStatus: (s) => s != null && s >= 200 && s < 400,
+          headers: {
+            if (sendsTumblrSessionTo(uri)) 'Cookie': tumblrCookies,
+          },
+        ),
+      );
+      final status = resp.statusCode ?? 0;
+      final location = resp.headers.value('location');
+      if (status < 300 || location == null) return resp;
+      uri = uri.resolve(location);
+    }
+    throw Exception('Failed to load page (too many redirects)');
   }
 
   List<MediaItem> _parsePage(String html, String pageUrl) {
